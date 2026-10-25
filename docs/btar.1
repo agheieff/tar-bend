@@ -1,0 +1,163 @@
+.TH BTAR 1 "2026-10-25" "btar 1.2.0" "User Commands"
+.SH NAME
+btar \- tar archiver written in Bend
+.SH SYNOPSIS
+.B btar
+.B \-c
+.B \-f
+.I ARCHIVE
+.RI [ options ]
+.I PATH ...
+.br
+.B btar
+.B \-r
+.RB | \-u
+.B \-f
+.I ARCHIVE
+.RI [ options ]
+.I PATH ...
+.br
+.B btar
+.B \-t
+.B \-f
+.I ARCHIVE
+.RI [ options ]
+.br
+.B btar
+.B \-x
+.B \-f
+.I ARCHIVE
+.RI [ options ]
+.SH DESCRIPTION
+.B btar
+creates, lists, extracts, appends to and updates tar archives. It reads v7, ustar, POSIX pax and the
+GNU longname/longlink and base-256 extensions; it writes ustar or POSIX pax.
+gzip input is detected automatically and gzip output is produced with
+.BR \-z .
+The pure format/policy core is written in Bend and covered by machine-checked
+laws; a small audited C effect layer performs syscalls and data copying.
+.SH OPTIONS
+.TP
+.BR \-c ", " \-t ", " \-x
+Create, list or extract an archive.
+.TP
+.BR \-r ", " \-\-append
+Append the operands to an existing
+.I uncompressed
+archive (created if absent). The existing entries are kept byte for byte; the new ones are
+written over the end-of-archive blocks, followed by a fresh trailer. The archive is validated
+first: a corrupt, truncated or compressed archive is refused with exit status 2 and left
+untouched. Hardlinks are recorded only between appended files.
+.TP
+.BR \-u ", " \-\-update
+Like
+.BR \-r ,
+but append only entries that are not yet in the archive or whose mtime (seconds) is newer than
+every archived copy of the same name. Directories already in the archive are never re-added.
+.B \-r
+and
+.B \-u
+cannot be combined with
+.BR \-z ,
+.BR \-c ,
+.BR \-t ,
+.B \-x
+or each other.
+.TP
+.BI \-f " ARCHIVE"
+Archive file (required).
+.TP
+.BR \-z ", " \-\-gzip
+gzip mode. Reading is auto-detected from the gzip magic; with
+.B \-c
+the output archive is gzip-compressed (128 KiB segments compressed in parallel on all cores;
+the output does not depend on the thread count).
+.TP
+.BI \-C " DIR"
+Change to DIR before processing members/create operands.
+.TP
+.BR \-v
+Verbose: print member names.
+.TP
+.BR \-p ", " \-\-preserve\-permissions
+Preserve permission bits (setuid/setgid are still cleared when not root).
+.TP
+.BI \-\-strip\-components= N
+Extraction: drop the first N path components.
+.TP
+.BR \-O
+Extraction: write regular-file payloads to stdout.
+.TP
+.BI \-\-one\-top\-level[= DIR ]
+Extraction: place all members under an (optional) top-level directory.
+.TP
+.BI \-\-format= ustar | pax
+Create: require ustar (fail if a member does not fit) or prefer pax headers.
+.TP
+.BI \-\-exclude= PATTERN
+Skip members/files whose stored name matches the wildcard PATTERN (repeatable; also
+.BI \-\-exclude " PATTERN" ).
+GNU semantics: the pattern is not anchored (it may match after any
+.BR / ),
+.BR * ,
+.B ?
+and
+.B [...]
+also match
+.BR / ,
+and a matching directory excludes its contents. Works with create, append, update, list and extract.
+.TP
+.BI \-\-exclude\-from= FILE ", " \-X " FILE"
+Read patterns from FILE, one per line (trailing whitespace stripped, empty lines ignored).
+.TP
+.B \-\-no\-recursion
+Create/append/update: archive a directory operand as a directory entry only.
+.TP
+.BR \-\-sort=name
+Create: sort each directory's entries by raw name bytes (deterministic output).
+.TP
+.BR \-\-version ", " \-V
+Print the version.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Completed with warnings (for example unsupported special entries were skipped).
+.TP
+.B 2
+Fatal error (bad archive, unsafe member, I/O or compression failure, limit exceeded).
+.SH SECURITY
+Extraction treats the archive as untrusted: absolute paths and
+.B ..
+components are rejected; symlinks are never followed during extraction
+(openat2 with RESOLVE_BENEATH and RESOLVE_NO_SYMLINKS plus O_NOFOLLOW); device,
+FIFO and special entries are refused; hardlinks must target an
+already-extracted regular file under the destination root; member sizes,
+counts, names and headers are bounded.
+.SH LIMITS
+Linux x86-64; members/archives are limited to 4 GiB. Append and update work on uncompressed
+archives only (GNU tar has the same restriction) and do not support
+.BR \-A ", " \-\-delete ", " \-d ,
+incremental or multi-volume archives. gzip is streamed: there is no limit on the
+size of a compressed archive, and a multi-GiB
+.B .tar.gz
+is listed or extracted in a few tens of MiB of memory. Compression uses every CPU core by default;
+memory grows with the number of threads (about 100 MiB at 24 threads, 35 MiB at one). Pass
+.B +RTS \-\-threads
+.I N
+.B \-RTS
+to bound it. Archive names
+.B \-
+(stdin/stdout) are not supported.
+.SH ENVIRONMENT
+.TP
+.B BENDRTS
+Extra runtime options for the Bend runtime (for example
+.BR "\-\-threads 4" ).
+.SH SEE ALSO
+.BR tar (1),
+.BR gzip (1)
+.SH AUTHORS
+tar-bend contributors. License: MIT.

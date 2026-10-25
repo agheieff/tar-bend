@@ -1,0 +1,45 @@
+# Whitelist .gitignore: block everything, then allow directories and selected files.
+*
+!*/
+
+# Repo metadata and documentation
+!README.md
+!AGENTS.md
+!LICENSE
+!VERSION
+!.gitignore
+!run.sh
+!plan/**
+!docs/**
+!*.md
+!*.txt
+
+# Source: Bend, C effects, JS stubs, tooling, bench scripts
+!*.bend
+!*.c
+!*.h
+!*.js
+!*.mjs
+!*.py
+!*.sh
+!*.json
+!*.toml
+!*.yml
+!*.yaml
+
+# Generated/local artifacts are blocked again (later rules win)
+fixtures/**
+!fixtures/.gitkeep
+bench/results/**
+build/**
+*.o
+*.a
+*.so
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.bin
+*.log
+.cache/
+/tmp/
