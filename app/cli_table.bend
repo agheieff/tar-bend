@@ -700,10 +700,6 @@ def table() -> List<&2, T.Sp>:
 
 def refused(+id: U32) -> Bool:
   match id:
-    case 5:
-      True{}
-    case 6:
-      True{}
     case 10:
       True{}
     case 16:

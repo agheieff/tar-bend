@@ -160,6 +160,11 @@ def Data.copy(in: File, out: File, size: U32) ->
   import "./fs.c"
   import "./fs.js"
 
+def Data.cmp(in: File, file: File, size: U32) ->
+  IO(File & (File & Result<&1, &1, U32 & String, U32>)):
+  import "./fs.c"
+  import "./fs.js"
+
 def Data.copy_eof(in: File, out: File) ->
   IO(File & (File & Result<&1, &1, U32 & String, Unit>)):
   import "./fs.c"

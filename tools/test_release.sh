@@ -267,6 +267,9 @@ stdio_line="$(grep -E 'test_stdio: [0-9]+ passed, 0 failed' "$CURRENT_LOG" | tai
 run_logged env BTAR="$BTAR" "$ROOT/tools/test_options.sh" || fail_fast "options harness failed"
 options_line="$(grep -E 'test_options: [0-9]+ passed, 0 failed' "$CURRENT_LOG" | tail -n 1 || true)"
 [ -n "$options_line" ] || fail_fast "options harness: summary missing"
+run_logged env BTAR="$BTAR" "$ROOT/tools/test_diff.sh" || fail_fast "diff harness failed"
+diff_line="$(grep -E 'test_diff: [0-9]+ passed, 0 failed' "$CURRENT_LOG" | tail -n 1 || true)"
+[ -n "$diff_line" ] || fail_fast "diff harness: summary missing"
 run_logged env BTAR="$BTAR" "$ROOT/tools/test_append.sh" || fail_fast "append harness failed"
 append_line="$(grep -E 'test_append: [0-9]+ passed, 0 failed' "$CURRENT_LOG" | tail -n 1 || true)"
 [ -n "$append_line" ] || fail_fast "append harness: summary missing"
@@ -274,7 +277,7 @@ run_logged python3 "$ROOT/tools/fuzz_append.py" --bin "$BTAR" --iterations 300 \
     || fail_fast "append fuzz failed"
 afuzz_line="$(grep -E 'fuzz_append: runs=[0-9]+ clean=[0-9]+' "$CURRENT_LOG" | tail -n 1 || true)"
 [ -n "$afuzz_line" ] || fail_fast "append fuzz: summary missing"
-pass "$append_line; $afuzz_line; $exclude_line; $members_line; $rewrite_line; $transform_line; $stdio_line; $options_line"
+pass "$append_line; $afuzz_line; $exclude_line; $members_line; $rewrite_line; $transform_line; $stdio_line; $options_line; $diff_line"
 
 # --------------------------------------------------------------------------- #
 # 12. M6 aggregate (full runs only; it repeats create/gzip/security/diff)

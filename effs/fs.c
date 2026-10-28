@@ -790,6 +790,67 @@ Term data_copy_eof_run(Env e, Term* f, IoWork* w) {
   return io_work(w, data_copy_eof_call, data_copy_pack);
 }
 
+// Data.cmp(in, file, size) -> in & file & Result<..., U32>: compares `size` bytes of the
+// archive stream with the start of `file` (btar -d).  Always consumes `size` archive
+// bytes so the stream stays in sync; value 0 = equal, 1 = differs (or file shorter).
+static void data_cmp_call(IoWork* w) {
+  char* a = w->data;
+  char* b = a + BTAR_COPY_CHUNK;
+  u64 want = w->size, done = 0;
+  w->word = 0;
+  w->code = 0;
+  while (done < want) {
+    u64 chunk = want - done < BTAR_COPY_CHUNK ? want - done : BTAR_COPY_CHUNK;
+    u64 got = 0;
+    while (got < chunk) {
+      ssize_t n = read((int)w->hand, a + got, chunk - got);
+      if (n < 0 && errno == EINTR) {
+        continue;
+      }
+      if (n <= 0) {
+        w->code = n < 0 ? (u32)errno : EIO;
+        return;
+      }
+      got += (u64)n;
+    }
+    u64 have = 0;
+    while (w->word == 0 && have < chunk) {
+      ssize_t n = read((int)w->made, b + have, chunk - have);
+      if (n < 0 && errno == EINTR) {
+        continue;
+      }
+      if (n < 0) {
+        w->code = (u32)errno;
+        return;
+      }
+      if (n == 0) {
+        w->word = 1;
+        break;
+      }
+      have += (u64)n;
+    }
+    if (w->word == 0 && memcmp(a, b, chunk) != 0) {
+      w->word = 1;
+    }
+    done += chunk;
+  }
+}
+
+static Term data_cmp_pack(Env e, IoWork* w) {
+  u32 v = (u32)w->word;
+  fs_clear(w);
+  Term r = io_res(e, w, (Term)(uint32_t)v);
+  return io_tup(e, io_hand(w->hand), io_tup(e, io_hand(w->made), r));
+}
+
+Term data_cmp_run(Env e, Term* f, IoWork* w) {
+  w->hand = (intptr_t)io_hand_v(f[0]);
+  w->made = (intptr_t)io_hand_v(f[1]);
+  w->size = (u32)f[2];
+  w->data = io_mem(malloc(2 * BTAR_COPY_CHUNK));
+  return io_work(w, data_cmp_call, data_cmp_pack);
+}
+
 // Fs.euid() -> U32. The effective uid decides whether -p may keep setuid/setgid.
 Term fs_euid_run(Env e, Term* f, IoWork* w) {
   (void)e; (void)f; (void)w;
@@ -1492,6 +1553,9 @@ static void __attribute__((constructor)) btar_fs_use(void) {
 #endif
 #ifdef CID(Data.copy_stdout)
   io_eff(CID(Data.copy_stdout), data_copy_stdout_run);
+#endif
+#ifdef CID(Data.cmp)
+  io_eff(CID(Data.cmp), data_cmp_run);
 #endif
 #ifdef CID(Data.copy_eof)
   io_eff(CID(Data.copy_eof), data_copy_eof_run);

@@ -348,6 +348,13 @@ function data_copy_eof(inp, out) {
 }
 
 io_eff(CID(Data.copy_eof), data_copy_eof);
+
+// Data.cmp is native-only (archive stream vs file contents).
+function data_cmp(inp, file, size) {
+  return io_tup(inp, io_tup(file, io_fail(38))); // ENOSYS
+}
+
+io_eff(CID(Data.cmp), data_cmp);
 io_eff(CID(Data.copy), data_copy);
 io_eff(CID(Stream.read_exact), stream_read_exact);
 io_eff(CID(Stream.write_bytes), stream_write_bytes);

@@ -910,7 +910,7 @@ def run_mode2(mode: U32, gz: Bool, co: COpts, op: Opts, wo: Wr.Wo,
       go_gz(gz, "cannot update a compressed archive (-r/-u do not work with -z)",
         rw_run(True{}, co))
     case _:
-      run_opts(op, gz, Wr.wo_exc(wo), xf, ctl, ops)
+      run_opts(op, gz, Wr.wo_exc(wo), xf, U32.or(ctl, Bool.pick(U32, U32.is_eq(mode, 4), 256, 0)), ops)
 
 def run_mode(r: Run) -> IO(Unit):
   match r:
@@ -928,6 +928,8 @@ def mode_msg(mask: U32) -> String:
 
 def valid_mask(mask: U32) -> Bool:
   match mask:
+    case 4:
+      True{}
     case 1:
       True{}
     case 2:

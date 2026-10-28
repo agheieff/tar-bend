@@ -53,7 +53,8 @@
 | `--delete -f ARCH NAME...` | yes | uncompressed archives, in place ([rewrite.md](rewrite.md)) |
 | `-A` / `--concatenate -f DEST SRC...` | yes | uncompressed archives, in place ([rewrite.md](rewrite.md)) |
 | `--transform=EXPR`, `--xform=EXPR` (also as separate argument; repeatable) | yes | create/append/update and extract; `s/RE/REPL/[gi]` ([transform.md](transform.md)) |
-| `--exclude-vcs/-caches/-tag`, `--anchored`, `--wildcards`, `--ignore-case`, `-d` | no | |
+| `-d` / `--diff` / `--compare` | yes | compares with the file system under `-C`; GNU messages on stdout, exit 1 on differences or "Cannot stat" (`tools/test_diff.sh`) |
+| `--exclude-vcs/-caches/-tag`, `--anchored`, `--wildcards`, `--ignore-case` | no | |
 
 ## pax keys consumed
 

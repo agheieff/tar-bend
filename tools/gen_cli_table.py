@@ -10,7 +10,7 @@ Run: python3 tools/gen_cli_table.py > app/cli_table.bend
 SPEC = [
     # operations
     ("catenate", "catenate", "A", 0, "I"), ("concat", "concatenate", None, 0, "I"),
-    ("create", "create", "c", 0, "I"), ("diff", "diff", "d", 0, "U"), ("compare", "compare", None, 0, "U"),
+    ("create", "create", "c", 0, "I"), ("diff", "diff", "d", 0, "I"), ("compare", "compare", None, 0, "I"),
     ("delete", "delete", None, 0, "I"), ("append", "append", "r", 0, "I"), ("list", "list", "t", 0, "I"),
     ("test_label", "test-label", None, 0, "U"), ("update", "update", "u", 0, "I"),
     ("extract", "extract", "x", 0, "I"), ("get", "get", None, 0, "I"),

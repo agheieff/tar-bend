@@ -21,6 +21,8 @@ import ./glob.bend as Glob
 import ./xform.bend as Xf
 import ./upd.bend as Up
 import ./listfmt.bend as LF
+import ./diff.bend as Df
+import ./num.bend as Nm
 import ../effs/effects.bend as Fx
 
 type Cfg is Data:
@@ -66,6 +68,7 @@ type Ev is Type:
   EvPad{next: U32, pad: U32, +pend: E.Pend}
   EvApply{off: U32, +h: H.Header, +tag: H.Tag, +pend: E.Pend}
   EvPrint{name: List<&2, U32>, nxt: Next}
+  EvDiff{h: H.Header, pend: E.Pend, glob: P.Pax, size: U32, off: U32, next: U32}
   EvList{h: H.Header, pend: E.Pend, glob: P.Pax, size: U32, nxt: Next}
   EvSkipData{off: U32, next: U32, size: U32}
   EvWalk{
@@ -1728,6 +1731,20 @@ def extract_mode(
 
 # -O: only regular-file payloads go to stdout; nothing is created on disk.
 
+# `-d` shares the list path: the header is compared with the file system instead.
+def apply_list_or_diff(
+  diff: Bool, fuel: Nat, archive: File, sink: File, root: List<&2, U32>,
+  +cfg: Cfg, +lim: Lim.State, seen: List<&1, List<&2, U32>>, +glob: P.Pax,
+  +off: U32, +next: U32, +size: U32, +h: H.Header, +tag: H.Tag, +pend: E.Pend
+) -> D:
+  match diff:
+    case True{}:
+      MkD{archive, sink, root, cfg, lim, seen, glob,
+        EvDiff{h, pend, glob, size, off, next}}
+    case False{}:
+      apply_list(fuel, archive, sink, root, cfg, lim, seen, glob, off, next,
+        size, h, tag, pend)
+
 def apply_cfg2(
   fuel: Nat, archive: File, sink: File, root: List<&2, U32>, +cfg: Cfg,
   +lim: Lim.State, seen: List<&1, List<&2, U32>>, +glob: P.Pax,
@@ -1737,8 +1754,8 @@ def apply_cfg2(
     case MkCfg{extract, strip, verbose, _, to_stdout, _, _, _, _, _, _, _, _}:
       match extract:
         case False{}:
-          apply_list(fuel, archive, sink, root, cfg, lim, seen, glob, off,
-            next, size, h, tag, pend)
+          apply_list_or_diff(cfg_flag(cfg, 256), fuel, archive, sink, root, cfg,
+            lim, seen, glob, off, next, size, h, tag, pend)
         case True{}:
           extract_mode(to_stdout, fuel, archive, sink, root, cfg, lim, seen,
             glob, off, next, size, h, tag, pend, strip, verbose)
@@ -1840,6 +1857,241 @@ def apply(
   apply_next(next_off(off, E.resolve_size(h, pend)), fuel, archive, sink,
     root, cfg, lim, seen, glob, off, h, tag, pend)
 
+# ---- btar -d ----------------------------------------------------------------------
+
+type Dr is Data:
+  MkDr{cmp: Bool, diff: Bool}
+
+def df_lead(fuel: Nat, xs: List<&2, U32>) -> List<&2, U32>:
+  match fuel:
+    case 0n:
+      xs
+    case 1n+p:
+      match xs:
+        case 47 <> t:
+          df_lead(p, t)
+        case _:
+          xs
+
+# root + "/" + member name (leading slashes dropped).
+def df_path(root: List<&2, U32>, +name: List<&2, U32>) -> List<&2, U32>:
+  B.list_cat(root, 47 <> df_lead(Nat.add(List.length(&2, U32, name), 1n), name))
+
+def df_shown(+name: List<&2, U32>) -> List<&2, U32>:
+  Up.norm_cut(name)
+
+def df_text(+name: List<&2, U32>, msgs: List<&2, List<&2, U32>>) -> List<&2, U32>:
+  match msgs:
+    case Nil{}:
+      Nil{}
+    case m <> t:
+      B.list_cat(name, B.list_cat(58 <> (32 <> m), B.list_cat(10 <> Nil{},
+        df_text(name, t))))
+
+def df_wr(r: Result<&1, &1, U32 & String, Unit>) -> IO(Unit):
+  match r:
+    case Done{u}:
+      IO.pure(Unit, Unit{})
+    case Fail{(code, msg)}:
+      IO.die(Unit, 2, "btar: write: " ++ msg)
+
+def df_emit(text: List<&2, U32>) -> IO(Unit):
+  match text:
+    case Nil{}:
+      IO.pure(Unit, Unit{})
+    case _ <> _:
+      do IO<Unit>:
+        r : Result<&1, &1, U32 & String, Unit> <- Fx.Stdout.write(text)
+        df_wr(r)
+
+def df_verbose(v: Bool, name: List<&2, U32>) -> IO(Unit):
+  match v:
+    case True{}:
+      df_emit(B.list_cat(LF.quote(name), 10 <> Nil{}))
+    case False{}:
+      IO.pure(Unit, Unit{})
+
+def df_is_nil(xs: List<&2, List<&2, U32>>) -> Bool:
+  match xs:
+    case Nil{}:
+      True{}
+    case _ <> _:
+      False{}
+
+def df_show(+name: List<&2, U32>, dm: Df.Dm) -> IO(Dr):
+  match dm:
+    case Df.MkDm{+msgs, cmp}:
+      do IO<Dr>:
+        u : Unit <- df_emit(df_text(name, msgs))
+        IO.pure(Dr, MkDr{cmp, Bool.not(df_is_nil(msgs))})
+
+def df_say(name: List<&2, U32>, m: String) -> IO(Dr):
+  df_show(name, Df.MkDm{Df.bs(m) <> Nil{}, False{}})
+
+def df_ok_or(ok: Bool, name: List<&2, U32>, m: String) -> IO(Dr):
+  match ok:
+    case True{}:
+      IO.pure(Dr, MkDr{False{}, False{}})
+    case False{}:
+      df_say(name, m)
+
+def df_sym2(r: Result<&1, &1, U32 & String, List<&2, U32>>,
+  link: List<&2, U32>, name: List<&2, U32>) -> IO(Dr):
+  match r:
+    case Done{v}:
+      df_ok_or(B.eq_list(v, link, True{}), name, "Symlink differs")
+    case Fail{_}:
+      df_say(name, "Symlink differs")
+
+def df_symlink2(isln: Bool, path: List<&2, U32>, link: List<&2, U32>,
+  name: List<&2, U32>) -> IO(Dr):
+  match isln:
+    case True{}:
+      do IO<Dr>:
+        r : Result<&1, &1, U32 & String, List<&2, U32>> <-
+          Fx.Fs.readlink_path(path)
+        df_sym2(r, link, name)
+    case False{}:
+      df_say(name, "File type differs")
+
+def df_symlink(st: List<&2, U32>, path: List<&2, U32>, link: List<&2, U32>,
+  name: List<&2, U32>) -> IO(Dr):
+  df_symlink2(U32.is_eq(Nm.nth(st, 0n), 10), path, link, name)
+
+def df_say_t(name: List<&2, U32>, target: List<&2, U32>) -> IO(Dr):
+  df_show(name, Df.MkDm{B.list_cat(Df.bs("Not linked to "), target) <> Nil{},
+    False{}})
+
+def df_hard3(same: Bool, name: List<&2, U32>, target: List<&2, U32>) -> IO(Dr):
+  match same:
+    case True{}:
+      IO.pure(Dr, MkDr{False{}, False{}})
+    case False{}:
+      df_say_t(name, target)
+
+def df_hard2(r: Result<&1, &1, U32 & String, List<&2, U32>>,
+  st: List<&2, U32>, name: List<&2, U32>, target: List<&2, U32>) -> IO(Dr):
+  match r:
+    case Done{t}:
+      df_hard3(Df.same_file(st, t), name, target)
+    case Fail{_}:
+      df_say_t(name, target)
+
+def df_hardlink(st: List<&2, U32>, root: List<&2, U32>, +target: List<&2, U32>,
+  name: List<&2, U32>) -> IO(Dr):
+  do IO<Dr>:
+    r : Result<&1, &1, U32 & String, List<&2, U32>> <-
+      Fx.Fs.stat_path(df_path(root, target))
+    df_hard2(r, st, name, target)
+
+def df_kind(+tf: U32, +st: List<&2, U32>, +root: List<&2, U32>, +path: List<&2, U32>,
+  +h: H.Header, +mt: U32, +size: U32, +link: List<&2, U32>, +name: List<&2, U32>) ->
+  IO(Dr):
+  match tf:
+    case 50:
+      df_symlink(st, path, link, name)
+    case 49:
+      df_hardlink(st, root, link, name)
+    case _:
+      df_show(name, Df.check(tf, H.h_mode(h), H.h_uid(h), H.h_gid(h), mt, size, st))
+
+def df_stat(r: Result<&1, &1, U32 & String, List<&2, U32>>, root: List<&2, U32>,
+  path: List<&2, U32>, +h: H.Header, mt: U32, size: U32, link: List<&2, U32>,
+  +name: List<&2, U32>) -> IO(Dr):
+  match r:
+    case Fail{(code, msg)}:
+      do IO<Dr>:
+        u : Unit <- IO.print_err("btar: " ++ B.list_show(name) ++
+          ": Warning: Cannot stat: " ++ msg)
+        IO.pure(Dr, MkDr{False{}, True{}})
+    case Done{st}:
+      df_kind(H.h_typeflag(h), st, root, path, h, mt, size, link, name)
+
+def df_entry(+root: List<&2, U32>, +h: H.Header, +pend: E.Pend, +glob: P.Pax,
+  +size: U32) -> IO(Dr):
+  do IO<Dr>:
+    r : Result<&1, &1, U32 & String, List<&2, U32>> <-
+      Fx.Fs.stat_path(df_path(root, df_shown(E.resolve_name(h, pend))))
+    df_stat(r, root, df_path(root, df_shown(E.resolve_name(h, pend))), h,
+      eff_mtime(h, pend, glob), size, link_of(E.resolve_link(h, pend)),
+      df_shown(E.resolve_name(h, pend)))
+
+# After the stat checks: compare contents (regular files of equal size) or skip.
+def df_skip(archive: File, sink: File, root: List<&2, U32>, cfg: Cfg,
+  lim: Lim.State, seen: List<&1, List<&2, U32>>, glob: P.Pax, off: U32,
+  next: U32, skip: U32) -> D:
+  MkD{archive, sink, root, cfg, lim, seen, glob, EvSkipData{off, next, skip}}
+
+def df_cmp_text(+v: U32, name: List<&2, U32>) -> List<&2, U32>:
+  Bool.pick(List<&2, U32>, U32.is_zero(v), Nil{},
+    df_text(name, Df.bs("Contents differ") <> Nil{}))
+
+def df_warn(+v: U32, +cfg: Cfg) -> Cfg:
+  Bool.pick(Cfg, U32.is_zero(v), cfg, warn_cfg(cfg))
+
+def df_cmp_done(pr: File & (File & Result<&1, &1, U32 & String, U32>),
+  name: List<&2, U32>, sink: File, root: List<&2, U32>, cfg: Cfg,
+  lim: Lim.State, seen: List<&1, List<&2, U32>>, glob: P.Pax, off: U32,
+  next: U32, pad: U32) -> IO(D):
+  (archive, rest) = pr
+  (f, r) = rest
+  match r:
+    case Done{+v}:
+      do IO<D>:
+        u : Unit <- File.close(f)
+        d : Unit <- df_emit(df_cmp_text(v, name))
+        IO.pure(D, df_skip(archive, sink, root, df_warn(v, cfg), lim, seen, glob,
+          off, next, pad))
+    case Fail{(code, msg)}:
+      IO.die(D, 2, "btar: " ++ msg)
+
+def df_open(r: Result<&1, &1, U32 & String, File>, archive: File, sink: File,
+  root: List<&2, U32>, cfg: Cfg, lim: Lim.State, seen: List<&1, List<&2, U32>>,
+  glob: P.Pax, off: U32, next: U32, +size: U32, +name: List<&2, U32>) -> IO(D):
+  match r:
+    case Done{f}:
+      do IO<D>:
+        pr : File & (File & Result<&1, &1, U32 & String, U32>) <-
+          Fx.Data.cmp(archive, f, size)
+        df_cmp_done(pr, name, sink, root, cfg, lim, seen, glob, off, next,
+          pad_of(size))
+    case Fail{(code, msg)}:
+      do IO<D>:
+        u : Unit <- IO.print_err("btar: " ++ B.list_show(name) ++
+          ": Warning: Cannot open: " ++ msg)
+        IO.pure(D, df_skip(archive, sink, root, warn_cfg(cfg), lim, seen, glob,
+          off, next, U32.add(size, pad_of(size))))
+
+def df_cfg(diff: Bool, cfg: Cfg) -> Cfg:
+  match diff:
+    case True{}:
+      warn_cfg(cfg)
+    case False{}:
+      cfg
+
+def df_content2(cmp: Bool, cfg: Cfg, archive: File, sink: File,
+  root: List<&2, U32>, lim: Lim.State, seen: List<&1, List<&2, U32>>,
+  glob: P.Pax, off: U32, next: U32, +size: U32, path: List<&2, U32>,
+  name: List<&2, U32>) -> IO(D):
+  match cmp:
+    case True{}:
+      do IO<D>:
+        r : Result<&1, &1, U32 & String, File> <- File.open_bytes(path, "r")
+        df_open(r, archive, sink, root, cfg, lim, seen, glob, off, next, size,
+          name)
+    case False{}:
+      IO.pure(D, df_skip(archive, sink, root, cfg, lim, seen, glob, off, next,
+        U32.add(size, pad_of(size))))
+
+def df_content(dr: Dr, archive: File, sink: File, root: List<&2, U32>,
+  cfg: Cfg, lim: Lim.State, seen: List<&1, List<&2, U32>>, glob: P.Pax,
+  off: U32, next: U32, size: U32, path: List<&2, U32>, name: List<&2, U32>) ->
+  IO(D):
+  match dr:
+    case MkDr{cmp, diff}:
+      df_content2(cmp, df_cfg(diff, cfg), archive, sink, root, lim, seen, glob,
+        off, next, size, path, name)
+
 def drive(fuel: Nat, d: D) -> IO(Unit):
   match fuel:
     case 0n:
@@ -1891,6 +2143,16 @@ def drive(fuel: Nat, d: D) -> IO(Unit):
                     Fx.Stdout.write(bstr_nl(LF.ln_line(ln)))
                   drive(pf, print_after(pr, 0n, archive, sink, root,
                     cfg_set_lw(cfg, LF.ln_w(ln)), lim, seen, glob, nxt))
+              case EvDiff{+h, +pend, glob2, +size, +off, +next}:
+                +pf : Nat = p
+                do IO<Unit>:
+                  +name : List<&2, U32> = E.resolve_name(h, pend)
+                  vb : Unit <- df_verbose(cfg_verbose(cfg), name)
+                  dr : Dr <- df_entry(root, h, pend, glob2, size)
+                  d : D <- df_content(dr, archive, sink, root, cfg, lim, seen,
+                    glob, off, next, size, df_path(root, df_shown(name)),
+                    df_shown(name))
+                  drive(pf, d)
               case EvSkipData{+off, +next, +size}:
                 +pf : Nat = p
                 do IO<Unit>:
