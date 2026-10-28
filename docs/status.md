@@ -47,10 +47,28 @@ v1.0.0 history: [release-notes-1.0.0.md](release-notes-1.0.0.md). v1.1.0:
   (matcher `src/glob.bend`); bugfixes: `--strip-components` misrouted to create mode, stripped-name
   payload padding, hardlink-target stripping; CI (`tools/ci.sh`, `.github/workflows/ci.yml`).
 
+- **1.3.0 (in progress)**: member operands for `-t`/`-x` (`Glob.selected`, `Cfg.mem`), `-T`/`--files-from`
+  `--delete`, `-A` ([rewrite.md](rewrite.md), 28 checks), `--transform` ([transform.md](transform.md), 54 + ~350 sed checks);
+  member operands + `-T` (`tools/test_members.sh`, 30 checks, incl. "Not found in archive" vs GNU tar). See [format-support.md](format-support.md).
+
+- **1.3.0 parity push** (uncommitted at the time of writing): GNU-style option parser
+  (`app/cli.bend` + generated `app/cli_table.bend`, all 173 GNU options recognised, see
+  [options.md](options.md)); `-f -` stdin/stdout; GNU `-tv` listing format and name quoting;
+  `uname`/`gname` on create; `--owner/--group/--mode/--mtime/--numeric-owner`; `-k`,
+  `--skip-old-files`, `--keep-newer-files`, `-m`; `--delete`, `-A`, `--transform`, member
+  operands, `-T`. Test scripts: `tools/test_{members,rewrite,transform,stdio,options}.sh`.
+  Remaining roadmap (in order): `-d`/`--diff`; create-side selection (`-h`, `--one-file-system`,
+  `-P`, `--newer*`, `--remove-files`, `--null`, `--exclude-vcs/-caches/-tag`, `-V`, `--totals`,
+  `-l`, `--format=gnu|v7`); extract-side (ownership restore, `--no-overwrite-dir`,
+  `--recursive-unlink`, `-i`, `-n`, `--to-command`, `--backup`, `-vv` on extract); xattr/ACL/
+  SELinux (pax `SCHILY.*`); sparse read/write; incremental (`-g`, `-G`); multi-volume (`-M`);
+  `--rsh-command`; other compressors (`-j -J --zstd -Z --lzip --lzma --lzop`, `-a`, `-I`);
+  U64 (>4 GiB). Then proofs.
+
 ## Next agent: where to continue
 
 1. Run `./tools/ci.sh --quick` (or `--full`) first; everything is expected green.
-2. Open items (none blocks the release): `-A`/`--delete`/`-d`, `-T`, `--transform`; GNU-style
+2. Open items (none blocks the release): `-d`/`--diff`, `--transform` extras (see transform.md), `-T` extras (`--null`, bundles); GNU-style
    positional option semantics for `--exclude`; POSIX classes in the matcher; `-X` in bundles;
    O(1) `-u` lookups are fine at 20k entries (~1.1 s) but a 1M-entry archive was not measured;
    `ws_end` always calls `Fs.trunc_cur` (cheap, but a refactor could make it append-only).

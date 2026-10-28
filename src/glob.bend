@@ -316,3 +316,57 @@ def excluded(+pats: List<&2, List<&2, U32>>, +name: List<&2, U32>) -> Bool:
     case _ <> _:
       exc_run(Nat.add(List.length(&2, List<&2, U32>, pats), 1n), False{},
         pats, U.norm_cut(name))
+
+# ---- member operands (list / extract) -------------------------------------
+#
+# GNU default: operands are literal (no wildcards), anchored at the start of
+# the stored name, and select the member itself and everything below it.
+# Trailing slashes are ignored on both sides.  No operands selects everything.
+
+def sel_one(+op: List<&2, U32>, +name: List<&2, U32>) -> Bool:
+  +o = U.norm_cut(op)
+  +m = List.length(&2, U32, o)
+  B.eq_list(B.list_cat(o, 47 <> Nil{}),
+    List.take(&2, U32, B.list_cat(U.norm_cut(name), 47 <> Nil{}),
+      Nat.add(m, 1n)), True{})
+
+def sel_run(fuel: Nat, +found: Bool, +ops: List<&2, List<&2, U32>>,
+  +name: List<&2, U32>) -> Bool:
+  match fuel:
+    case 0n:
+      found
+    case 1n+n:
+      match found:
+        case True{}:
+          True{}
+        case False{}:
+          match ops:
+            case Nil{}:
+              False{}
+            case p <> t:
+              sel_run(n, sel_one(p, name), t, name)
+
+def selected(+ops: List<&2, List<&2, U32>>, +name: List<&2, U32>) -> Bool:
+  match ops:
+    case Nil{}:
+      True{}
+    case _ <> _:
+      sel_run(Nat.add(List.length(&2, List<&2, U32>, ops), 1n), False{},
+        ops, name)
+
+def un_keep(+hit: Bool, op: List<&2, U32>, rest: List<&2, List<&2, U32>>) ->
+  List<&2, List<&2, U32>>:
+  match hit:
+    case True{}:
+      rest
+    case False{}:
+      op <> rest
+
+# Operands left after removing those that select `name` (for "Not found").
+def unmatched(+ops: List<&2, List<&2, U32>>, +name: List<&2, U32>) ->
+  List<&2, List<&2, U32>>:
+  match ops:
+    case Nil{}:
+      Nil{}
+    case op <> t:
+      un_keep(sel_one(op, name), op, unmatched(t, name))

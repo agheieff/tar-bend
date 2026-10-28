@@ -190,7 +190,8 @@ function fs_fchmodat(dir, name, mode) {
 function fs_utimensat(dir, name, mtime) {
   const b = fs_component(fs_bytes(name));
   return io_tup(dir, b === null ? io_fail(22)
-    : fs_unit(() => fs_lane.utimesSync(fs_proc(dir, b), mtime, mtime)));
+    : fs_unit(() => (mtime >>> 0) === 0xFFFFFFFF ? undefined
+      : fs_lane.utimesSync(fs_proc(dir, b), mtime, mtime)));
 }
 
 // Fs.renameat(dir, from, to).
@@ -314,6 +315,25 @@ function fs_euid() {
 
 io_eff(CID(Fs.euid), fs_euid);
 
+// Fs.tzoff: local offset at time t, biased by 2^31 (JS lane: Date's view).
+function fs_tzoff(t) {
+  return (-new Date((t >>> 0) * 1000).getTimezoneOffset() * 60 + 2147483648) >>> 0;
+}
+
+io_eff(CID(Fs.tzoff), fs_tzoff);
+
+// Fs.id_name / Fs.name_id: no passwd database in the JS lane.
+function fs_id_name(kind, id) {
+  return io_fail(2);
+}
+
+function fs_name_id(kind, name) {
+  return io_fail(2);
+}
+
+io_eff(CID(Fs.id_name), fs_id_name);
+io_eff(CID(Fs.name_id), fs_name_id);
+
 // Data.copy_stdout is native-only: the JS lane cannot guarantee byte-exact
 // raw fd 1 writes (and must not corrupt non-UTF-8 payloads).
 function data_copy_stdout(file, size) {
@@ -321,6 +341,13 @@ function data_copy_stdout(file, size) {
 }
 
 io_eff(CID(Data.copy_stdout), data_copy_stdout);
+
+// Data.copy_eof is native-only (stdin pump).
+function data_copy_eof(inp, out) {
+  return io_tup(inp, io_tup(out, io_fail(38))); // ENOSYS
+}
+
+io_eff(CID(Data.copy_eof), data_copy_eof);
 io_eff(CID(Data.copy), data_copy);
 io_eff(CID(Stream.read_exact), stream_read_exact);
 io_eff(CID(Stream.write_bytes), stream_write_bytes);

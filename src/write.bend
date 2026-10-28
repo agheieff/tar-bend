@@ -16,12 +16,20 @@ import ../src/pax.bend as P
 import ../src/limits.bend as Lim
 import ../src/upd.bend as U
 import ../src/glob.bend as Glob
+import ../src/xform.bend as Xf
 import ../effs/effects.bend as Fx
 
 # ---- pure helpers --------------------------------------------------------
 
+type Ov is Data:
+  MkOv{uid: U32, un: List<&2, U32>, gid: U32, gn: List<&2, U32>, mand: U32,
+    mor: U32, mx: U32, mt: U32, numeric: Bool}
+
+def no_ov() -> Ov:
+  MkOv{4294967295, Nil{}, 4294967295, Nil{}, 4294967295, 0, 0, 4294967295, False{}}
+
 type WCfg is Data:
-  MkCfg{fmt: U32, preserve: Bool, verbose: Bool}
+  MkCfg{fmt: U32, preserve: Bool, verbose: Bool, xf: List<&2, Xf.Xc>, ov: Ov}
 
 type Plan is Data:
   POk{blocks: List<&2, List<&2, U32>>}
@@ -49,7 +57,8 @@ type Frame is Type:
 # Walk options: --sort=name, the `-u` archive table (empty for create/append:
 # nothing is skipped), --exclude patterns, --no-recursion.
 type Wo is Data:
-  MkWo{sort: Bool, upd: U.Tab, exc: List<&2, List<&2, U32>>, norec: Bool}
+  MkWo{sort: Bool, upd: U.Tab, exc: List<&2, List<&2, U32>>, norec: Bool,
+    xf: List<&2, Xf.Xc>, ov: Ov}
 
 type Cx is Data:
   MkCx{
@@ -239,7 +248,7 @@ def mode_it(p: Bool, m0: U32) -> U32:
 
 def mode_of(+cfg: WCfg, m0: U32) -> U32:
   match cfg:
-    case MkCfg{_, preserve, _}:
+    case MkCfg{_, preserve, _, _, _}:
       mode_it(preserve, m0)
 
 def mode_by4(sym: Bool) -> U32:
@@ -372,10 +381,97 @@ def mk_hdr(name: List<&2, U32>, mode: U32, uid: U32, gid: U32, size: U32,
   H.MkHeader{name, mode, uid, gid, size, mtime, tflag, link, 1, Nil{}, Nil{},
     0, 0, Nil{}}
 
+def cfg_xf(+cfg: WCfg) -> List<&2, Xf.Xc>:
+  match cfg:
+    case MkCfg{_, _, _, xf, _}:
+      xf
+
+# --transform applies to the stored name and to link targets (never to the
+# path used to read the file).
+def lead_slash(fuel: Nat, xs: List<&2, U32>) -> List<&2, U32>:
+  match fuel:
+    case 0n:
+      xs
+    case 1n+p:
+      match xs:
+        case 47 <> t:
+          lead_slash(p, t)
+        case _:
+          xs
+
+# A hard-link target loses leading slashes after the transform (GNU).
+def xf_link2(isdir: Bool, +link: List<&2, U32>) -> List<&2, U32>:
+  match isdir:
+    case True{}:
+      lead_slash(Nat.add(List.length(&2, U32, link), 1n), link)
+    case False{}:
+      link
+
+def xf_link(+xf: List<&2, Xf.Xc>, +kind: U32, link: List<&2, U32>) ->
+  List<&2, U32>:
+  match link:
+    case Nil{}:
+      Nil{}
+    case _ <> _:
+      xf_link2(U32.is_eq(kind, 49), Xf.apply(xf, link))
+
+# Directory names are transformed without their trailing slash (GNU).
+def xf_name2(isdir: Bool, xf: List<&2, Xf.Xc>, name: List<&2, U32>) ->
+  List<&2, U32>:
+  match isdir:
+    case True{}:
+      with_slash(Xf.apply(xf, U.norm_cut(name)))
+    case False{}:
+      Xf.apply(xf, name)
+
+def xf_name(+xf: List<&2, Xf.Xc>, kind: U32, +name: List<&2, U32>) ->
+  List<&2, U32>:
+  match xf:
+    case Nil{}:
+      name
+    case _ <> _:
+      xf_name2(U32.is_eq(kind, 53), xf, name)
+
+def cfg_ov(+cfg: WCfg) -> Ov:
+  match cfg:
+    case MkCfg{_, _, _, _, ov}:
+      ov
+
+def ov_pick(+v: U32, +o: U32) -> U32:
+  Bool.pick(U32, U32.is_eq(o, 4294967295), v, o)
+
+# `X` bits apply to directories and to modes that already have an execute bit.
+def ov_mode2(+m: U32, +kind: U32, +mx: U32) -> U32:
+  Bool.pick(U32, Bool.or(U32.is_eq(kind, 53), Bool.not(U32.is_zero(U32.and(m, 73)))),
+    U32.or(m, mx), m)
+
+def ov_mode(+ov: Ov, +kind: U32, +m: U32) -> U32:
+  match ov:
+    case MkOv{_, _, _, _, +mand, +mor, +mx, _, _}:
+      ov_mode2(U32.or(U32.and(m, mand), mor), kind, mx)
+
+def ov_uid(+ov: Ov, +v: U32) -> U32:
+  match ov:
+    case MkOv{uid, _, _, _, _, _, _, _, _}:
+      ov_pick(v, uid)
+
+def ov_gid(+ov: Ov, +v: U32) -> U32:
+  match ov:
+    case MkOv{_, _, gid, _, _, _, _, _, _}:
+      ov_pick(v, gid)
+
+def ov_mt(+ov: Ov, +v: U32) -> U32:
+  match ov:
+    case MkOv{_, _, _, _, _, _, _, mt, _}:
+      ov_pick(v, mt)
+
 def hdr_of(ent: Ent, +cfg: WCfg) -> H.Header:
   match ent:
-    case MkEnt{+name, kind, mode, uid, gid, +sz, mt, link}:
-      mk_hdr(name, mode_of(cfg, mode), uid, gid, sz, mt, kind, link)
+    case MkEnt{+name, +kind, mode, uid, gid, +sz, mt, link}:
+      mk_hdr(xf_name(cfg_xf(cfg), kind, name),
+        ov_mode(cfg_ov(cfg), kind, mode_of(cfg, mode)), ov_uid(cfg_ov(cfg), uid),
+        ov_gid(cfg_ov(cfg), gid), sz, ov_mt(cfg_ov(cfg), mt), kind,
+        xf_link(cfg_xf(cfg), kind, link))
 
 def hdr_root(+cfg: WCfg) -> H.Header:
   mk_hdr(bstr("./"), 493, 0, 0, 0, 0, 53, Nil{})
@@ -534,7 +630,7 @@ def plan_fmt2(is_ustar: Bool, +h: H.Header,
 def plan_fmt(+cfg: WCfg, +h: H.Header,
   r: Result<&1, &1, H.EncErr, List<&2, U32>>) -> Plan:
   match cfg:
-    case MkCfg{fmt, _, _}:
+    case MkCfg{fmt, _, _, _, _}:
       plan_fmt2(U32.is_eq(fmt, 1), h, r)
 
 def plan(+h: H.Header, +cfg: WCfg) -> Plan:
@@ -592,8 +688,8 @@ def verb2(v: Bool, name: List<&2, U32>) -> IO(Unit):
 
 def verb_io(+cfg: WCfg, name: List<&2, U32>) -> IO(Unit):
   match cfg:
-    case MkCfg{_, _, verbose}:
-      verb2(verbose, name)
+    case MkCfg{_, _, verbose, xf, _}:
+      verb2(verbose, Xf.apply(xf, name))
 
 def warn_io(name: List<&2, U32>) -> IO(Unit):
   do IO<Unit>:
@@ -750,6 +846,70 @@ def emit2(archive: File, pl: Plan) -> IO(File):
 def emit(archive: File, +h: H.Header, +cfg: WCfg) -> IO(File):
   emit2(archive, plan(h, cfg))
 
+# Owner / group names for a header: an explicit --owner/--group name, none with
+# --numeric-owner or a numeric override, otherwise the passwd / group entry.
+def name_pick(given: List<&2, U32>, skip: Bool, r: Result<&1, &1, U32 & String,
+  List<&2, U32>>) -> List<&2, U32>:
+  match given:
+    case _ <> _:
+      given
+    case Nil{}:
+      match skip:
+        case True{}:
+          Nil{}
+        case False{}:
+          match r:
+            case Done{v}:
+              v
+            case Fail{_}:
+              Nil{}
+
+def id_name_for(kind: U32, id: U32, given: List<&2, U32>, skip: Bool) ->
+  IO(List<&2, U32>):
+  do IO<List<&2, U32>>:
+    r : Result<&1, &1, U32 & String, List<&2, U32>> <- Fx.Fs.id_name(kind, id)
+    IO.pure(List<&2, U32>, name_pick(given, skip, r))
+
+def ov_skip_u(+ov: Ov) -> Bool:
+  match ov:
+    case MkOv{_, _, _, _, _, _, _, _, numeric}:
+      numeric
+
+def ov_skip_g(+ov: Ov) -> Bool:
+  match ov:
+    case MkOv{_, _, _, _, _, _, _, _, numeric}:
+      numeric
+
+def ov_un(ov: Ov) -> List<&2, U32>:
+  match ov:
+    case MkOv{_, un, _, _, _, _, _, _, _}:
+      un
+
+def ov_gn(ov: Ov) -> List<&2, U32>:
+  match ov:
+    case MkOv{_, _, _, gn, _, _, _, _, _}:
+      gn
+
+def with_names(h: H.Header, un: List<&2, U32>, gn: List<&2, U32>) -> H.Header:
+  H.set_names(h, un, gn)
+
+def ent_hdr2(h: H.Header, un: List<&2, U32>, gn: List<&2, U32>) -> IO(H.Header):
+  IO.pure(H.Header, with_names(h, un, gn))
+
+def ent_hdr(+h: Ent, +cfg: WCfg) -> IO(H.Header):
+  do IO<H.Header>:
+    +h0 : H.Header = hdr_of(h, cfg)
+    un : List<&2, U32> <- id_name_for(0, H.h_uid(h0), ov_un(cfg_ov(cfg)),
+      ov_skip_u(cfg_ov(cfg)))
+    gn : List<&2, U32> <- id_name_for(1, H.h_gid(h0), ov_gn(cfg_ov(cfg)),
+      ov_skip_g(cfg_ov(cfg)))
+    ent_hdr2(h0, un, gn)
+
+def emit_ent(archive: File, +h: Ent, +cfg: WCfg) -> IO(File):
+  do IO<File>:
+    hd : H.Header <- ent_hdr(h, cfg)
+    emit(archive, hd, cfg)
+
 def exit_w(warned: Bool) -> IO(Unit):
   match warned:
     case True{}:
@@ -894,28 +1054,28 @@ def cx_sort(+cx: Cx) -> Bool:
   match cx:
     case MkCx{root, ops, acc, refs, wo}:
       match wo:
-        case MkWo{sort, upd, exc, norec}:
+        case MkWo{sort, upd, exc, norec, xf, ov}:
           sort
 
 def cx_upd(+cx: Cx) -> U.Tab:
   match cx:
     case MkCx{root, ops, acc, refs, wo}:
       match wo:
-        case MkWo{sort, upd, exc, norec}:
+        case MkWo{sort, upd, exc, norec, xf, ov}:
           upd
 
 def cx_exc(+cx: Cx) -> List<&2, List<&2, U32>>:
   match cx:
     case MkCx{root, ops, acc, refs, wo}:
       match wo:
-        case MkWo{sort, upd, exc, norec}:
+        case MkWo{sort, upd, exc, norec, xf, ov}:
           exc
 
 def cx_norec(+cx: Cx) -> Bool:
   match cx:
     case MkCx{root, ops, acc, refs, wo}:
       match wo:
-        case MkWo{sort, upd, exc, norec}:
+        case MkWo{sort, upd, exc, norec, xf, ov}:
           norec
 
 def cx_add_if(skip: Bool, +cx: Cx, +ent: Ent) -> Cx:
@@ -1148,9 +1308,19 @@ def preflight(root: List<&2, U32>, ops: List<&2, List<&2, U32>>) ->
   IO(Unit):
   pf_run(256n, PfGo{root, ops})
 
+def wo_xf(wo: Wo) -> List<&2, Xf.Xc>:
+  match wo:
+    case MkWo{sort, upd, exc, norec, xf, ov}:
+      xf
+
+def wo_ov(wo: Wo) -> Ov:
+  match wo:
+    case MkWo{sort, upd, exc, norec, xf, ov}:
+      ov
+
 def wo_exc(wo: Wo) -> List<&2, List<&2, U32>>:
   match wo:
-    case MkWo{sort, upd, exc, norec}:
+    case MkWo{sort, upd, exc, norec, xf, ov}:
       exc
 
 # An operand matched by --exclude is skipped whole (GNU: the root operand
@@ -1588,11 +1758,11 @@ def cdrive(fuel: Nat, st: CSt) -> IO(List<&2, Ent>):
 
 def wo_tab(wo: Wo, tab: U.Tab) -> Wo:
   match wo:
-    case MkWo{sort, upd, exc, norec}:
-      MkWo{sort, tab, exc, norec}
+    case MkWo{sort, upd, exc, norec, xf, ov}:
+      MkWo{sort, tab, exc, norec, xf, ov}
 
 def wo_plain() -> Wo:
-  MkWo{False{}, U.TNil{}, Nil{}, False{}}
+  MkWo{False{}, U.TNil{}, Nil{}, False{}, Nil{}, no_ov()}
 
 def collect(root: List<&2, U32>, ops: List<&2, List<&2, U32>>,
   wo: Wo) -> IO(List<&2, Ent>):
@@ -1707,7 +1877,7 @@ def ws_regular(
         lim2 : Lim.State <- lim_add(lim, sz)
         lim3 : Lim.State <- lim_nm(lim2, name)
         v : Unit <- verb_io(cfg, name)
-        a2 : File <- emit(archive, hdr_of(h, cfg), cfg)
+        a2 : File <- emit_ent(archive, h, cfg)
         a3 : File <- cp_src(src, a2, sz)
         a4 : File <- wz(a3, pad512(sz))
         IO.pure(WS, WsRun{a4, base, ents, cfg, lim3, warned, selfid})
@@ -1753,7 +1923,7 @@ def ws_kind(
       do IO<WS>:
         lim2 : Lim.State <- lim_nm(lim, name)
         v : Unit <- verb_io(cfg, name)
-        a2 : File <- emit(archive, hdr_of(h, cfg), cfg)
+        a2 : File <- emit_ent(archive, h, cfg)
         IO.pure(WS, WsRun{a2, base, ents, cfg, lim2, warned, selfid})
 
 def ws_ent(

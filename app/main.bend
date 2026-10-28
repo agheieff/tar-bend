@@ -1,3 +1,10 @@
+# app/main.bend — btar CLI: option parsing glue and the operation runners.
+#
+# argv is handled as raw bytes end to end (IO.args_bytes): archive and -C paths never
+# round-trip through String.  app/cli.bend parses the command line (GNU syntax, table
+# driven); this file maps the parsed options onto create / append / update / list /
+# extract / --delete / -A.  Format handling is the pure core in src/, the streaming
+# driver is src/read_stream, and every syscall is an effect in effs/.
 # app/main.bend — btar CLI (M3): stream-list and stream-extract a tar archive.
 #
 #   btar -tf ARCHIVE [-v]
@@ -16,8 +23,15 @@ import ../src/read_stream.bend as R
 import ../effs/effects.bend as Fx
 import ../src/write.bend as Wr
 import ../src/append.bend as Ap
+import ../src/rewrite.bend as Rw
+import ../src/xform.bend as Xf
 import ../src/upd.bend as U
 import ../src/gzio.bend as Gzio
+import ./cli.bend as Cl
+import ./ovparse.bend as Op
+import ../src/num.bend as N
+import ./cli_types.bend as T
+import ./cli_table.bend as Tb
 
 # ---- byte helpers ---------------------------------------------------------
 
@@ -83,6 +97,10 @@ def starts(+xs: List<&2, U32>, +ys: List<&2, U32>) -> Bool:
         case +gy <> +yt:
           Bool.and(U32.is_eq(hx, gy), starts(xt, yt))
 
+# An option cluster (`-xvf`), not the bare `-` that names stdin/stdout.
+def dash_opt(+tok: List<&2, U32>) -> Bool:
+  Bool.and(starts(tok, bstr("-")), Bool.not(beq(tok, bstr("-"))))
+
 def drop_n(n: Nat, xs: List<&2, U32>) -> List<&2, U32>:
   match n:
     case 0n:
@@ -100,12 +118,6 @@ def blen(xs: List<&2, U32>) -> Nat:
       0n
     case _ <> t:
       (1n + blen(t) : Nat)
-
-def usage() -> String:
-  "usage: btar [-tf|-xf|-tzf|-xzf ARCHIVE] [-C DIR] [-v] [-p] [-O] " ++
-  "[--strip-components=N] [--one-top-level[=DIR]] [-z]\n" ++
-  "       [--exclude=PATTERN] [--exclude-from=FILE] [--version]\n" ++
-  "gzip is streamed (no size caps). - is not supported as an archive."
 
 def rev_b(fuel: Nat, xs: List<&2, U32>, acc: List<&2, U32>) ->
   List<&2, U32>:
@@ -208,80 +220,6 @@ def parse_u32_bytes(xs: List<&2, U32>) -> Maybe<&2, U32>:
 
 # ---- token classes --------------------------------------------------------
 
-def iftag(c: Bool, t: Unit -> Tag, f: Unit -> Tag) -> Tag:
-  match c:
-    case True{}:
-      t(Unit{})
-    case False{}:
-      f(Unit{})
-
-type Tag is Data:
-  TTf{}
-  TXf{}
-  TT{}
-  TX{}
-  TF{}
-  TC{}
-  TV{}
-  TP{}
-  TPres{}
-  TO{}
-  TOneAuto{}
-  TOneArg{dir: List<&2, U32>}
-  TList{}
-  TStrip{}
-  TBad{}
-
-def cls14(+tok: List<&2, U32>) -> Tag:
-  iftag(starts(tok, bstr("--strip-components=")), u => TStrip{}, u => TBad{})
-
-def cls13b(+tok: List<&2, U32>) -> Tag:
-  iftag(starts(tok, bstr("--one-top-level=")),
-    u => TOneArg{drop_n(16n, tok)}, u => cls14(tok))
-
-def cls13(+tok: List<&2, U32>) -> Tag:
-  iftag(beq(tok, bstr("--one-top-level")), u => TOneAuto{},
-    u => cls13b(tok))
-
-def cls12(+tok: List<&2, U32>) -> Tag:
-  iftag(beq(tok, bstr("-O")), u => TO{}, u => cls13(tok))
-
-def cls11(+tok: List<&2, U32>) -> Tag:
-  iftag(beq(tok, bstr("--preserve-permissions")), u => TPres{},
-    u => cls12(tok))
-
-def cls10(+tok: List<&2, U32>) -> Tag:
-  iftag(beq(tok, bstr("-p")), u => TP{}, u => cls11(tok))
-
-def cls9(+tok: List<&2, U32>) -> Tag:
-  iftag(beq(tok, bstr("--list")), u => TList{}, u => cls10(tok))
-
-def cls8(+tok: List<&2, U32>) -> Tag:
-  iftag(beq(tok, bstr("-v")), u => TV{}, u => cls9(tok))
-
-def cls7(+tok: List<&2, U32>) -> Tag:
-  iftag(beq(tok, bstr("-C")), u => TC{}, u => cls8(tok))
-
-def cls6(+tok: List<&2, U32>) -> Tag:
-  iftag(beq(tok, bstr("-f")), u => TF{}, u => cls7(tok))
-
-def cls5(+tok: List<&2, U32>) -> Tag:
-  iftag(beq(tok, bstr("-x")), u => TX{}, u => cls6(tok))
-
-def cls4(+tok: List<&2, U32>) -> Tag:
-  iftag(beq(tok, bstr("-t")), u => TT{}, u => cls5(tok))
-
-def cls3(+tok: List<&2, U32>) -> Tag:
-  iftag(beq(tok, bstr("-xf")), u => TXf{}, u => cls4(tok))
-
-def cls2(+tok: List<&2, U32>) -> Tag:
-  iftag(beq(tok, bstr("-tf")), u => TTf{}, u => cls3(tok))
-
-def cls(tok: List<&2, U32>) -> Tag:
-  cls2(tok)
-
-# ---- options and parser states -------------------------------------------
-
 type OneTop is Data:
   OtNo{}
   OtAuto{}
@@ -298,403 +236,6 @@ type Opts is Data:
     verbose: Bool,
     preserve: Bool
   }
-
-type Ps is Data:
-  PStart{
-    list: Bool,
-    extract: Bool,
-    to_stdout: Bool,
-    verbose: Bool,
-    preserve: Bool,
-    strip: U32,
-    path: Maybe<&2, List<&2, U32>>,
-    root: Maybe<&2, List<&2, U32>>,
-    onetop: OneTop
-  }
-  PWantFile{
-    list: Bool,
-    extract: Bool,
-    to_stdout: Bool,
-    verbose: Bool,
-    preserve: Bool,
-    strip: U32,
-    root: Maybe<&2, List<&2, U32>>,
-    onetop: OneTop
-  }
-  PWantDir{
-    list: Bool,
-    extract: Bool,
-    to_stdout: Bool,
-    verbose: Bool,
-    preserve: Bool,
-    strip: U32,
-    path: Maybe<&2, List<&2, U32>>,
-    onetop: OneTop
-  }
-  PDone{
-    list: Bool,
-    extract: Bool,
-    to_stdout: Bool,
-    verbose: Bool,
-    preserve: Bool,
-    strip: U32,
-    path: Maybe<&2, List<&2, U32>>,
-    root: Maybe<&2, List<&2, U32>>,
-    onetop: OneTop
-  }
-  PBad{}
-
-# ---- token -> next state --------------------------------------------------
-
-# Bundled short options ("-xO", "-xpf", "-xOf"): GNU-compatible single-dash
-# clusters of flag letters; f/C must be the last letter (value = next argv).
-type Bst is Data:
-  BstGo{
-    rest: List<&2, U32>,
-    list: Bool,
-    extract: Bool,
-    to_stdout: Bool,
-    verbose: Bool,
-    preserve: Bool,
-    strip: U32,
-    path: Maybe<&2, List<&2, U32>>,
-    root: Maybe<&2, List<&2, U32>>,
-    onetop: OneTop
-  }
-  BstFile{rest: List<&2, U32>, flags: Ps}
-  BstDir{rest: List<&2, U32>, flags: Ps}
-  BstBad{}
-
-def bch_cfin(t: List<&2, U32>, flags: Ps) -> Bst:
-  match t:
-    case Nil{}:
-      BstDir{Nil{}, flags}
-    case _ <> _:
-      BstBad{}
-
-def bch_c(
-  is_c: Bool, h: U32, t: List<&2, U32>, list: Bool, extract: Bool,
-  to_stdout: Bool, verbose: Bool, preserve: Bool, strip: U32,
-  path: Maybe<&2, List<&2, U32>>, root: Maybe<&2, List<&2, U32>>,
-  onetop: OneTop
-) -> Bst:
-  match is_c:
-    case True{}:
-      bch_cfin(t, PWantDir{list, extract, to_stdout, verbose, preserve, strip,
-        path, onetop})
-    case False{}:
-      BstBad{}
-
-def bch_fin(t: List<&2, U32>, flags: Ps) -> Bst:
-  match t:
-    case Nil{}:
-      BstFile{Nil{}, flags}
-    case _ <> _:
-      BstBad{}
-
-def bch_f(
-  is_f: Bool, is_c: Bool, h: U32, t: List<&2, U32>, list: Bool,
-  extract: Bool, to_stdout: Bool, verbose: Bool, preserve: Bool, strip: U32,
-  path: Maybe<&2, List<&2, U32>>, root: Maybe<&2, List<&2, U32>>,
-  onetop: OneTop
-) -> Bst:
-  match is_f:
-    case True{}:
-      bch_fin(t, PWantFile{list, extract, to_stdout, verbose, preserve, strip,
-        root, onetop})
-    case False{}:
-      bch_c(is_c, h, t, list, extract, to_stdout, verbose, preserve, strip,
-        path, root, onetop)
-
-def bch_v(
-  is_v: Bool, is_f: Bool, is_c: Bool, h: U32, t: List<&2, U32>, list: Bool,
-  extract: Bool, to_stdout: Bool, verbose: Bool, preserve: Bool, strip: U32,
-  path: Maybe<&2, List<&2, U32>>, root: Maybe<&2, List<&2, U32>>,
-  onetop: OneTop
-) -> Bst:
-  match is_v:
-    case True{}:
-      BstGo{t, list, extract, to_stdout, True{}, preserve, strip, path, root,
-        onetop}
-    case False{}:
-      bch_f(is_f, is_c, h, t, list, extract, to_stdout, verbose, preserve,
-        strip, path, root, onetop)
-
-def bch_o(
-  is_o: Bool, is_v: Bool, is_f: Bool, is_c: Bool, h: U32,
-  t: List<&2, U32>, list: Bool, extract: Bool, to_stdout: Bool,
-  verbose: Bool, preserve: Bool, strip: U32,
-  path: Maybe<&2, List<&2, U32>>, root: Maybe<&2, List<&2, U32>>,
-  onetop: OneTop
-) -> Bst:
-  match is_o:
-    case True{}:
-      BstGo{t, False{}, True{}, True{}, verbose, preserve, strip, path, root,
-        onetop}
-    case False{}:
-      bch_v(is_v, is_f, is_c, h, t, list, extract, to_stdout, verbose,
-        preserve, strip, path, root, onetop)
-
-def bch_p(
-  is_p: Bool, is_o: Bool, is_v: Bool, is_f: Bool, is_c: Bool, h: U32,
-  t: List<&2, U32>, list: Bool, extract: Bool, to_stdout: Bool,
-  verbose: Bool, preserve: Bool, strip: U32,
-  path: Maybe<&2, List<&2, U32>>, root: Maybe<&2, List<&2, U32>>,
-  onetop: OneTop
-) -> Bst:
-  match is_p:
-    case True{}:
-      BstGo{t, list, extract, to_stdout, verbose, True{}, strip, path, root,
-        onetop}
-    case False{}:
-      bch_o(is_o, is_v, is_f, is_c, h, t, list, extract, to_stdout, verbose,
-        preserve, strip, path, root, onetop)
-
-def bch_t(
-  is_t: Bool, is_p: Bool, is_o: Bool, is_v: Bool, is_f: Bool, is_c: Bool,
-  h: U32, t: List<&2, U32>, list: Bool, extract: Bool, to_stdout: Bool,
-  verbose: Bool, preserve: Bool, strip: U32,
-  path: Maybe<&2, List<&2, U32>>, root: Maybe<&2, List<&2, U32>>,
-  onetop: OneTop
-) -> Bst:
-  match is_t:
-    case True{}:
-      BstGo{t, True{}, extract, to_stdout, verbose, preserve, strip, path,
-        root, onetop}
-    case False{}:
-      bch_p(is_p, is_o, is_v, is_f, is_c, h, t, list, extract, to_stdout,
-        verbose, preserve, strip, path, root, onetop)
-
-def bch(
-  is_x: Bool, is_t: Bool, is_p: Bool, is_o: Bool, is_v: Bool, is_f: Bool,
-  is_c: Bool, h: U32, t: List<&2, U32>, list: Bool, extract: Bool,
-  to_stdout: Bool, verbose: Bool, preserve: Bool, strip: U32,
-  path: Maybe<&2, List<&2, U32>>, root: Maybe<&2, List<&2, U32>>,
-  onetop: OneTop
-) -> Bst:
-  match is_x:
-    case True{}:
-      BstGo{t, list, True{}, to_stdout, verbose, preserve, strip, path, root,
-        onetop}
-    case False{}:
-      bch_t(is_t, is_p, is_o, is_v, is_f, is_c, h, t, list, extract,
-        to_stdout, verbose, preserve, strip, path, root, onetop)
-
-def bundle_run(fuel: Nat, st: Bst) -> Ps:
-  match fuel:
-    case 0n:
-      PBad{}
-    case 1n+p:
-      match st:
-        case BstBad{}:
-          PBad{}
-        case BstFile{rest, flags}:
-          flags
-        case BstDir{rest, flags}:
-          flags
-        case BstGo{rest, list, extract, to_stdout, verbose, preserve, strip,
-            path, root, onetop}:
-          match rest:
-            case Nil{}:
-              PStart{list, extract, to_stdout, verbose, preserve, strip, path,
-                root, onetop}
-            case +h <> +t:
-              bundle_run(p,
-                bch(U32.is_eq(h, 120), U32.is_eq(h, 116), U32.is_eq(h, 112),
-                  U32.is_eq(h, 79), U32.is_eq(h, 118), U32.is_eq(h, 102),
-                  U32.is_eq(h, 67), h, t, list, extract, to_stdout, verbose,
-                  preserve, strip, path, root, onetop))
-
-def bundle_or_bad(
-  rest: List<&2, U32>, list: Bool, extract: Bool, to_stdout: Bool,
-  verbose: Bool, preserve: Bool, strip: U32,
-  path: Maybe<&2, List<&2, U32>>, root: Maybe<&2, List<&2, U32>>,
-  onetop: OneTop
-) -> Ps:
-  match rest:
-    case Nil{}:
-      PBad{}
-    case r:
-      bundle_run(64n,
-        BstGo{r, list, extract, to_stdout, verbose, preserve, strip, path,
-          root, onetop})
-
-def nonopt_path(
-  path: Maybe<&2, List<&2, U32>>, tok: List<&2, U32>, list: Bool,
-  extract: Bool, to_stdout: Bool, verbose: Bool, preserve: Bool, strip: U32,
-  root: Maybe<&2, List<&2, U32>>, onetop: OneTop
-) -> Ps:
-  match path:
-    case None{}:
-      PStart{list, extract, to_stdout, verbose, preserve, strip, Some{tok},
-        root, onetop}
-    case Some{p}:
-      PBad{}
-
-def nonopt(
-  isdash: Bool, tok: List<&2, U32>, list: Bool, extract: Bool,
-  to_stdout: Bool, verbose: Bool, preserve: Bool, strip: U32,
-  path: Maybe<&2, List<&2, U32>>, root: Maybe<&2, List<&2, U32>>,
-  onetop: OneTop
-) -> Ps:
-  match isdash:
-    case True{}:
-      bundle_or_bad(drop_n(1n, tok), list, extract, to_stdout, verbose,
-        preserve, strip, path, root, onetop)
-    case False{}:
-      nonopt_path(path, tok, list, extract, to_stdout, verbose, preserve,
-        strip, root, onetop)
-
-def strip_split(
-  m: Maybe<&2, U32>, list: Bool, extract: Bool, to_stdout: Bool,
-  verbose: Bool, preserve: Bool, path: Maybe<&2, List<&2, U32>>,
-  root: Maybe<&2, List<&2, U32>>, onetop: OneTop
-) -> Ps:
-  match m:
-    case Some{n}:
-      PStart{list, extract, to_stdout, verbose, preserve, n, path, root,
-        onetop}
-    case None{}:
-      PBad{}
-
-def tag_split(
-  tag: Tag, list: Bool, extract: Bool, to_stdout: Bool, verbose: Bool,
-  preserve: Bool, strip: U32, path: Maybe<&2, List<&2, U32>>,
-  root: Maybe<&2, List<&2, U32>>, onetop: OneTop, +tok: List<&2, U32>
-) -> Ps:
-  match tag:
-    case TTf{}:
-      PWantFile{True{}, False{}, to_stdout, verbose, preserve, strip, root,
-        onetop}
-    case TXf{}:
-      PWantFile{False{}, True{}, to_stdout, verbose, preserve, strip, root,
-        onetop}
-    case TT{}:
-      PStart{True{}, extract, to_stdout, verbose, preserve, strip, path,
-        root, onetop}
-    case TX{}:
-      PStart{list, True{}, to_stdout, verbose, preserve, strip, path, root,
-        onetop}
-    case TF{}:
-      PWantFile{list, extract, to_stdout, verbose, preserve, strip, root,
-        onetop}
-    case TC{}:
-      PWantDir{list, extract, to_stdout, verbose, preserve, strip, path,
-        onetop}
-    case TV{}:
-      PStart{list, extract, to_stdout, True{}, preserve, strip, path, root,
-        onetop}
-    case TP{}:
-      PStart{list, extract, to_stdout, verbose, True{}, strip, path, root,
-        onetop}
-    case TPres{}:
-      PStart{list, extract, to_stdout, verbose, True{}, strip, path, root,
-        onetop}
-    case TO{}:
-      PStart{False{}, True{}, True{}, verbose, preserve, strip, path, root,
-        onetop}
-    case TOneAuto{}:
-      PStart{list, extract, to_stdout, verbose, preserve, strip, path, root,
-        OtAuto{}}
-    case TOneArg{dir}:
-      PStart{list, extract, to_stdout, verbose, preserve, strip, path, root,
-        OtDir{dir}}
-    case TList{}:
-      PStart{True{}, extract, to_stdout, verbose, preserve, strip, path,
-        root, onetop}
-    case TStrip{}:
-      strip_split(parse_u32_bytes(drop_n(19n, tok)), list, extract,
-        to_stdout, verbose, preserve, path, root, onetop)
-    case TBad{}:
-      nonopt(starts(tok, bstr("-")), tok, list, extract, to_stdout, verbose,
-        preserve, strip, path, root, onetop)
-
-def token_step(
-  list: Bool, extract: Bool, to_stdout: Bool, verbose: Bool, preserve: Bool,
-  strip: U32, path: Maybe<&2, List<&2, U32>>,
-  root: Maybe<&2, List<&2, U32>>, onetop: OneTop, +tok: List<&2, U32>
-) -> Ps:
-  tag_split(cls(tok), list, extract, to_stdout, verbose, preserve, strip,
-    path, root, onetop, tok)
-
-# ---- scanner --------------------------------------------------------------
-
-def done_root(
-  extract: Bool, to_stdout: Bool, verbose: Bool, preserve: Bool, strip: U32,
-  archive: List<&2, U32>, root: Maybe<&2, List<&2, U32>>, onetop: OneTop
-) -> IO(Opts):
-  IO.pure(Opts, MkOpts{archive, extract, to_stdout, root, onetop, strip,
-    verbose, preserve})
-
-def done_path(
-  extract: Bool, to_stdout: Bool, verbose: Bool, preserve: Bool, strip: U32,
-  path: Maybe<&2, List<&2, U32>>, root: Maybe<&2, List<&2, U32>>,
-  onetop: OneTop
-) -> IO(Opts):
-  match path:
-    case None{}:
-      IO.die(Opts, 2, usage())
-    case Some{archive}:
-      done_root(extract, to_stdout, verbose, preserve, strip, archive, root,
-        onetop)
-
-def done_opts(
-  list: Bool, extract: Bool, to_stdout: Bool, verbose: Bool, preserve: Bool,
-  strip: U32, path: Maybe<&2, List<&2, U32>>,
-  root: Maybe<&2, List<&2, U32>>, onetop: OneTop
-) -> IO(Opts):
-  match list:
-    case True{}:
-      done_path(False{}, to_stdout, verbose, preserve, strip, path, root,
-        onetop)
-    case False{}:
-      match extract:
-        case True{}:
-          done_path(True{}, to_stdout, verbose, preserve, strip, path, root,
-            onetop)
-        case False{}:
-          IO.die(Opts, 2, usage())
-
-def walk(fuel: Nat, ps: Ps, argv: List<&1, List<&2, U32>>) -> IO(Opts):
-  match fuel:
-    case 0n:
-      IO.die(Opts, 2, "btar: argument list too long")
-    case 1n+p:
-      match ps:
-        case PBad{}:
-          IO.die(Opts, 2, usage())
-        case PDone{list, extract, to_stdout, verbose, preserve, strip, path,
-            root, onetop}:
-          done_opts(list, extract, to_stdout, verbose, preserve, strip, path,
-            root, onetop)
-        case PStart{list, extract, to_stdout, verbose, preserve, strip, path,
-            root, onetop}:
-          match argv:
-            case Nil{}:
-              walk(p, PDone{list, extract, to_stdout, verbose, preserve,
-                strip, path, root, onetop}, Nil{})
-            case h <> t:
-              walk(p,
-                token_step(list, extract, to_stdout, verbose, preserve, strip,
-                  path, root, onetop, h), t)
-        case PWantFile{list, extract, to_stdout, verbose, preserve, strip,
-            root, onetop}:
-          match argv:
-            case Nil{}:
-              IO.die(Opts, 2, usage())
-            case h <> t:
-              walk(p, PStart{list, extract, to_stdout, verbose, preserve,
-                strip, Some{h}, root, onetop}, t)
-        case PWantDir{list, extract, to_stdout, verbose, preserve, strip,
-            path, onetop}:
-          match argv:
-            case Nil{}:
-              IO.die(Opts, 2, usage())
-            case h <> t:
-              walk(p, PStart{list, extract, to_stdout, verbose, preserve,
-                strip, path, Some{h}, onetop}, t)
-
-# ---- IO -------------------------------------------------------------------
 
 def root_base(root: Maybe<&2, List<&2, U32>>) -> List<&2, U32>:
   match root:
@@ -768,59 +309,65 @@ def gz_is_magic(bs: List<&2, U32>) -> Bool:
     case Nil{}:
       False{}
 
-def rw_after(pr: File & Result<&1, &1, U32 & String, Unit>) ->
-  IO(File & Gzio.Dr):
-  (f, r) = pr
-  match r:
-    case Done{u}:
-      IO.pure(File & Gzio.Dr, (f, Gzio.DrNone{}))
-    case Fail{(code, msg)}:
-      IO.die(File & Gzio.Dr, 2, "btar: seek: " ++ msg)
-
-# Gzip input: the decoder runs in a forked pump feeding a pipe (src/gzio.bend).
-def gz_started(pr: File & Result<&1, &1, U32 & String, Unit>) ->
-  IO(File & Gzio.Dr):
+# `rewind` fails on a pipe (stdin): the consumed magic bytes are then re-fed
+# through a pipe (Gzio.feed_open) instead of seeking back.
+def gz_started(pr: File & Result<&1, &1, U32 & String, Unit>,
+  magic: List<&2, U32>) -> IO(File & Gzio.Dr):
   (f, r) = pr
   match r:
     case Done{u}:
       Gzio.inflate_open(f)
     case Fail{(code, msg)}:
-      IO.die(File & Gzio.Dr, 2, "btar: seek: " ++ msg)
+      do IO<File & Gzio.Dr>:
+        p : File <- Gzio.feed_open(f, magic)
+        Gzio.inflate_open(p)
 
-def gz_inflate(a: File) -> IO(File & Gzio.Dr):
+def gz_inflate(a: File, magic: List<&2, U32>) -> IO(File & Gzio.Dr):
   do IO<File & Gzio.Dr>:
     pr : File & Result<&1, &1, U32 & String, Unit> <- Fx.Stream.rewind(a)
-    gz_started(pr)
+    gz_started(pr, magic)
 
-def gz_keep(a: File) -> IO(File & Gzio.Dr):
+def rw_after(pr: File & Result<&1, &1, U32 & String, Unit>,
+  magic: List<&2, U32>) -> IO(File & Gzio.Dr):
+  (f, r) = pr
+  match r:
+    case Done{u}:
+      IO.pure(File & Gzio.Dr, (f, Gzio.DrNone{}))
+    case Fail{(code, msg)}:
+      do IO<File & Gzio.Dr>:
+        p : File <- Gzio.feed_open(f, magic)
+        IO.pure(File & Gzio.Dr, (p, Gzio.DrNone{}))
+
+def gz_keep(a: File, magic: List<&2, U32>) -> IO(File & Gzio.Dr):
   do IO<File & Gzio.Dr>:
     pr : File & Result<&1, &1, U32 & String, Unit> <-
       Fx.Stream.rewind(a)
-    rw_after(pr)
+    rw_after(pr, magic)
 
-def gz_no(a: File, given: Bool) -> IO(File & Gzio.Dr):
+def gz_no(a: File, given: Bool, magic: List<&2, U32>) -> IO(File & Gzio.Dr):
   match given:
     case True{}:
       IO.die(File & Gzio.Dr, 2, "btar: -z given but the input is not gzip data")
     case False{}:
-      gz_keep(a)
+      gz_keep(a, magic)
 
-def gz_yes(yes: Bool, a: File, given: Bool) -> IO(File & Gzio.Dr):
+def gz_yes(yes: Bool, a: File, given: Bool, magic: List<&2, U32>) ->
+  IO(File & Gzio.Dr):
   match yes:
     case True{}:
-      gz_inflate(a)
+      gz_inflate(a, magic)
     case False{}:
-      gz_no(a, given)
+      gz_no(a, given, magic)
 
 def gz_magic_after(
   pr: File & Result<&1, &1, U32 & String, List<&2, U32>>, given: Bool
 ) -> IO(File & Gzio.Dr):
   (a, r) = pr
   match r:
-    case Done{bs}:
-      gz_yes(gz_is_magic(bs), a, given)
+    case Done{+bs}:
+      gz_yes(gz_is_magic(bs), a, given, bs)
     case Fail{(code, msg)}:
-      gz_no(a, given)
+      gz_no(a, given, Nil{})
 
 def gz_prepare(a: File, given: Bool) -> IO(File & Gzio.Dr):
   do IO<File & Gzio.Dr>:
@@ -832,262 +379,6 @@ def gz_prepare(a: File, given: Bool) -> IO(File & Gzio.Dr):
 
 # ---- M5 gzip CLI flag --------------------------------------------------
 
-def chas_z(fuel: Nat, xs: List<&2, U32>, found: Bool) -> Bool:
-  match fuel:
-    case 0n:
-      found
-    case 1n+p:
-      match xs:
-        case Nil{}:
-          found
-        case +h <> t:
-          chas_z(p, t, Bool.or(found, U32.is_eq(h, 122)))
-
-def tok_is_z2(isdash: Bool, +tok: List<&2, U32>) -> Bool:
-  match isdash:
-    case True{}:
-      chas_z(256n, tok, False{})
-    case False{}:
-      False{}
-
-def tok_is_z(+tok: List<&2, U32>) -> Bool:
-  tok_is_z2(starts(tok, bstr("-")), tok)
-
-def has_z(fuel: Nat, found: Bool,
-  argv: List<&1, List<&2, U32>>) -> Bool:
-  match fuel:
-    case 0n:
-      found
-    case 1n+p:
-      match found:
-        case True{}:
-          True{}
-        case False{}:
-          match argv:
-            case Nil{}:
-              False{}
-            case h <> t:
-              has_z(p, tok_is_z(h), t)
-
-def drop_z_ch(is_z: Bool, h: U32, acc: List<&2, U32>) -> List<&2, U32>:
-  match is_z:
-    case True{}:
-      acc
-    case False{}:
-      B.list_cat(acc, h <> Nil{})
-
-def drop_z(fuel: Nat, xs: List<&2, U32>, acc: List<&2, U32>) ->
-  List<&2, U32>:
-  match fuel:
-    case 0n:
-      acc
-    case 1n+p:
-      match xs:
-        case Nil{}:
-          acc
-        case +h <> t:
-          drop_z(p, t, drop_z_ch(U32.is_eq(h, 122), h, acc))
-
-type FZ is Data:
-  FZKeep{tok: List<&2, U32>}
-  FZNew{tok: List<&2, U32>}
-  FZDrop{}
-
-def fz_short3(empty: Bool, out: List<&2, U32>) -> FZ:
-  match empty:
-    case True{}:
-      FZDrop{}
-    case False{}:
-      FZNew{out}
-
-def blen2(xs: List<&2, U32>) -> Nat:
-  List.length(&2, U32, xs)
-
-def fz_short2(dash: Bool, +out: List<&2, U32>) -> FZ:
-  match dash:
-    case True{}:
-      FZDrop{}
-    case False{}:
-      fz_short3(U32.is_eq(U32.from_nat(blen2(out)), 0), out)
-
-def fz_short(+out: List<&2, U32>) -> FZ:
-  fz_short2(beq(out, bstr("-")), out)
-
-def fz_tok3(isdash: Bool, +tok: List<&2, U32>) -> FZ:
-  match isdash:
-    case True{}:
-      fz_short(drop_z(256n, tok, Nil{}))
-    case False{}:
-      FZKeep{tok}
-
-def fz_tok2(long: Bool, +tok: List<&2, U32>) -> FZ:
-  match long:
-    case True{}:
-      FZDrop{}
-    case False{}:
-      fz_tok3(starts(tok, bstr("-")), tok)
-
-def fz_tok(+tok: List<&2, U32>) -> FZ:
-  fz_tok2(beq(tok, bstr("--gzip")), tok)
-
-def untag(fuel: Nat, xs: List<&1, FZ>) ->
-  List<&1, List<&2, U32>>:
-  match fuel:
-    case 0n:
-      Nil{}
-    case 1n+p:
-      match xs:
-        case Nil{}:
-          Nil{}
-        case h <> t:
-          match h:
-            case FZDrop{}:
-              untag(p, t)
-            case FZKeep{tok}:
-              tok <> untag(p, t)
-            case FZNew{tok}:
-              tok <> untag(p, t)
-
-def tag_z(fuel: Nat, argv: List<&1, List<&2, U32>>) ->
-  List<&1, FZ>:
-  match fuel:
-    case 0n:
-      Nil{}
-    case 1n+p:
-      match argv:
-        case Nil{}:
-          Nil{}
-        case h <> t:
-          fz_tok(h) <> tag_z(p, t)
-
-def filter_z(+fuel: Nat, argv: List<&1, List<&2, U32>>) ->
-  List<&1, List<&2, U32>>:
-  untag(fuel, tag_z(fuel, argv))
-
-# ---- M6 --sort=name option ---------------------------------------------
-
-type SOpt is Data:
-  SKeep{tok: List<&2, U32>}
-  SDrop{}
-
-def s_token2(hit: Bool, +tok: List<&2, U32>) -> SOpt:
-  match hit:
-    case True{}:
-      SDrop{}
-    case False{}:
-      SKeep{tok}
-
-def s_token(+tok: List<&2, U32>) -> SOpt:
-  s_token2(beq(tok, bstr("--sort=name")), tok)
-
-def tag_s(fuel: Nat, argv: List<&1, List<&2, U32>>) -> List<&1, SOpt>:
-  match fuel:
-    case 0n:
-      Nil{}
-    case 1n+p:
-      match argv:
-        case Nil{}:
-          Nil{}
-        case h <> t:
-          s_token(h) <> tag_s(p, t)
-
-def untag_s(fuel: Nat, xs: List<&1, SOpt>) ->
-  List<&1, List<&2, U32>>:
-  match fuel:
-    case 0n:
-      Nil{}
-    case 1n+p:
-      match xs:
-        case Nil{}:
-          Nil{}
-        case h <> t:
-          match h:
-            case SDrop{}:
-              untag_s(p, t)
-            case SKeep{tok}:
-              tok <> untag_s(p, t)
-
-def strip_sort(+fuel: Nat, argv: List<&1, List<&2, U32>>) ->
-  List<&1, List<&2, U32>>:
-  untag_s(fuel, tag_s(fuel, argv))
-
-def any_drop(fuel: Nat, xs: List<&1, SOpt>) -> Bool:
-  match fuel:
-    case 0n:
-      False{}
-    case 1n+p:
-      match xs:
-        case Nil{}:
-          False{}
-        case h <> t:
-          match h:
-            case SDrop{}:
-              True{}
-            case SKeep{tok}:
-              any_drop(p, t)
-
-# ---- M7 --version -------------------------------------------------------
-
-def tok_version(+tok: List<&2, U32>) -> Bool:
-  Bool.or(beq(tok, bstr("--version")), beq(tok, bstr("-V")))
-
-def tag_ver(fuel: Nat, argv: List<&1, List<&2, U32>>) ->
-  List<&1, Bool>:
-  match fuel:
-    case 0n:
-      Nil{}
-    case 1n+p:
-      match argv:
-        case Nil{}:
-          Nil{}
-        case h <> t:
-          tok_version(h) <> tag_ver(p, t)
-
-def any_true(fuel: Nat, xs: List<&1, Bool>) -> Bool:
-  match fuel:
-    case 0n:
-      False{}
-    case 1n+p:
-      match xs:
-        case Nil{}:
-          False{}
-        case h <> t:
-          match h:
-            case True{}:
-              True{}
-            case False{}:
-              any_true(p, t)
-
-def has_version(+fuel: Nat, argv: List<&1, List<&2, U32>>) -> Bool:
-  any_true(fuel, tag_ver(fuel, argv))
-
-def tok_dash(+tok: List<&2, U32>) -> Bool:
-  beq(tok, bstr("-"))
-
-def tag_dash(fuel: Nat, argv: List<&1, List<&2, U32>>) ->
-  List<&1, Bool>:
-  match fuel:
-    case 0n:
-      Nil{}
-    case 1n+p:
-      match argv:
-        case Nil{}:
-          Nil{}
-        case h <> t:
-          tok_dash(h) <> tag_dash(p, t)
-
-def has_dash(+fuel: Nat, argv: List<&1, List<&2, U32>>) -> Bool:
-  any_true(fuel, tag_dash(fuel, argv))
-
-def drop_prog(xs: List<&1, List<&2, U32>>) -> List<&1, List<&2, U32>>:
-  match xs:
-    case Nil{}:
-      Nil{}
-    case _ <> t:
-      t
-
-# ---- M4 create mode (-cf) ------------------------------------------------
-
 type COpts is Data:
   MkCOpts{
     archive: List<&2, U32>,
@@ -1097,89 +388,6 @@ type COpts is Data:
     fmt: U32,
     paths: List<&2, List<&2, U32>>
   }
-
-type CK is Data:
-  CKGo{
-    archive: Maybe<&2, List<&2, U32>>,
-    root: Maybe<&2, List<&2, U32>>,
-    verbose: Bool,
-    preserve: Bool,
-    fmt: U32,
-    paths: List<&2, List<&2, U32>>
-  }
-  CKWantFile{
-    root: Maybe<&2, List<&2, U32>>,
-    verbose: Bool,
-    preserve: Bool,
-    fmt: U32,
-    paths: List<&2, List<&2, U32>>
-  }
-  CKWantDir{
-    archive: Maybe<&2, List<&2, U32>>,
-    verbose: Bool,
-    preserve: Bool,
-    fmt: U32,
-    paths: List<&2, List<&2, U32>>
-  }
-  CKDone{
-    archive: Maybe<&2, List<&2, U32>>,
-    root: Maybe<&2, List<&2, U32>>,
-    verbose: Bool,
-    preserve: Bool,
-    fmt: U32,
-    paths: List<&2, List<&2, U32>>
-  }
-  CKBad{}
-
-# 0 = not create, 1 = create, 2 = bad
-
-def chas_c(fuel: Nat, xs: List<&2, U32>, found: Bool) -> Bool:
-  match fuel:
-    case 0n:
-      found
-    case 1n+p:
-      match xs:
-        case Nil{}:
-          found
-        case +h <> t:
-          chas_c(p, t, Bool.or(found, U32.is_eq(h, 99)))
-
-def tok_has_c2(isdash: Bool, tok: List<&2, U32>) -> Bool:
-  match isdash:
-    case True{}:
-      chas_c(256n, tok, False{})
-    case False{}:
-      False{}
-
-def tok_has_c(+tok: List<&2, U32>) -> Bool:
-  tok_has_c2(Bool.and(starts(tok, bstr("-")),
-    Bool.not(starts(tok, bstr("--")))), tok)
-
-def scan_create(fuel: Nat, found: Bool,
-  argv: List<&1, List<&2, U32>>) -> Bool:
-  match fuel:
-    case 0n:
-      found
-    case 1n+p:
-      match found:
-        case True{}:
-          True{}
-        case False{}:
-          match argv:
-            case Nil{}:
-              False{}
-            case h <> t:
-              scan_create(p, tok_has_c(h), t)
-
-# token codes: 1 -f, 2 -C, 3 -v, 4 -p, 5 --format=ustar,
-# 6 --format=pax, 7 bundled, 8 positional, 9 bad
-
-def cusage() -> String:
-  "usage: btar -cf|-rf|-uf ARCHIVE [PATH...] [-C DIR] [-v] [-p] [-z] " ++
-  "[--sort=name] [--format=ustar|pax] [--no-recursion]\n" ++
-  "       [--exclude=PATTERN] [--exclude-from=FILE] [--version]\n" ++
-  "-r appends and -u updates an uncompressed archive (no -z).\n" ++
-  "gzip is streamed (no size caps). - is not supported as an archive."
 
 def cpath_def2(empty: Bool, paths: List<&2, List<&2, U32>>) ->
   List<&2, List<&2, U32>>:
@@ -1200,213 +408,6 @@ def cpath_default(+paths: List<&2, List<&2, U32>>) ->
   List<&2, List<&2, U32>>:
   cpath_def2(U32.is_eq(U32.from_nat(clen2(paths)), 0), paths)
 
-def cdone(archive: Maybe<&2, List<&2, U32>>, root: Maybe<&2, List<&2, U32>>,
-  verbose: Bool, preserve: Bool, fmt: U32,
-  paths: List<&2, List<&2, U32>>) -> IO(COpts):
-  match archive:
-    case None{}:
-      IO.die(COpts, 2, cusage())
-    case Some{ar}:
-      IO.pure(COpts, MkCOpts{ar, root, verbose, preserve, fmt, paths})
-
-def ck_root(st: CK) -> Maybe<&2, List<&2, U32>>:
-  match st:
-    case CKGo{archive, root, verbose, preserve, fmt, paths}:
-      root
-    case CKWantFile{root, verbose, preserve, fmt, paths}:
-      root
-    case CKWantDir{archive, verbose, preserve, fmt, paths}:
-      None{}
-    case CKDone{archive, root, verbose, preserve, fmt, paths}:
-      root
-    case CKBad{}:
-      None{}
-
-def ck_verbose(st: CK) -> Bool:
-  match st:
-    case CKGo{archive, root, verbose, preserve, fmt, paths}:
-      verbose
-    case CKWantFile{root, verbose, preserve, fmt, paths}:
-      verbose
-    case CKWantDir{archive, verbose, preserve, fmt, paths}:
-      verbose
-    case CKDone{archive, root, verbose, preserve, fmt, paths}:
-      verbose
-    case CKBad{}:
-      False{}
-
-def ck_preserve(st: CK) -> Bool:
-  match st:
-    case CKGo{archive, root, verbose, preserve, fmt, paths}:
-      preserve
-    case CKWantFile{root, verbose, preserve, fmt, paths}:
-      preserve
-    case CKWantDir{archive, verbose, preserve, fmt, paths}:
-      preserve
-    case CKDone{archive, root, verbose, preserve, fmt, paths}:
-      preserve
-    case CKBad{}:
-      False{}
-
-def ck_fmt(st: CK) -> U32:
-  match st:
-    case CKGo{archive, root, verbose, preserve, fmt, paths}:
-      fmt
-    case CKWantFile{root, verbose, preserve, fmt, paths}:
-      fmt
-    case CKWantDir{archive, verbose, preserve, fmt, paths}:
-      fmt
-    case CKDone{archive, root, verbose, preserve, fmt, paths}:
-      fmt
-    case CKBad{}:
-      0
-
-def ck_paths(st: CK) -> List<&2, List<&2, U32>>:
-  match st:
-    case CKGo{archive, root, verbose, preserve, fmt, paths}:
-      paths
-    case CKWantFile{root, verbose, preserve, fmt, paths}:
-      paths
-    case CKWantDir{archive, verbose, preserve, fmt, paths}:
-      paths
-    case CKDone{archive, root, verbose, preserve, fmt, paths}:
-      paths
-    case CKBad{}:
-      Nil{}
-
-def ck_fmt_set(st: CK, fmt: U32) -> CK:
-  match st:
-    case CKGo{archive, root, verbose, preserve, fmt0, paths}:
-      CKGo{archive, root, verbose, preserve, fmt, paths}
-    case CKWantFile{root, verbose, preserve, fmt0, paths}:
-      CKWantFile{root, verbose, preserve, fmt, paths}
-    case CKWantDir{archive, verbose, preserve, fmt0, paths}:
-      CKWantDir{archive, verbose, preserve, fmt, paths}
-    case CKDone{archive, root, verbose, preserve, fmt0, paths}:
-      CKDone{archive, root, verbose, preserve, fmt, paths}
-    case CKBad{}:
-      CKBad{}
-
-def ck_verbose_set(st: CK) -> CK:
-  match st:
-    case CKGo{archive, root, verbose, preserve, fmt, paths}:
-      CKGo{archive, root, True{}, preserve, fmt, paths}
-    case CKWantFile{root, verbose, preserve, fmt, paths}:
-      CKWantFile{root, True{}, preserve, fmt, paths}
-    case CKWantDir{archive, verbose, preserve, fmt, paths}:
-      CKWantDir{archive, True{}, preserve, fmt, paths}
-    case CKDone{archive, root, verbose, preserve, fmt, paths}:
-      CKDone{archive, root, True{}, preserve, fmt, paths}
-    case CKBad{}:
-      CKBad{}
-
-def ck_to_go2(st: CK) -> CK:
-  match st:
-    case CKGo{archive, root, verbose, preserve, fmt, paths}:
-      CKGo{archive, root, verbose, preserve, fmt, paths}
-    case CKWantFile{root, verbose, preserve, fmt, paths}:
-      CKGo{None{}, root, verbose, preserve, fmt, paths}
-    case CKWantDir{archive, verbose, preserve, fmt, paths}:
-      CKGo{archive, None{}, verbose, preserve, fmt, paths}
-    case CKDone{archive, root, verbose, preserve, fmt, paths}:
-      CKDone{archive, root, verbose, preserve, fmt, paths}
-    case CKBad{}:
-      CKBad{}
-
-def ck_to_go(st: CK) -> CK:
-  ck_to_go2(st)
-
-# Bundled create flags: c (create), v, p, f (must be last), C (must be last).
-
-def ck_dir_from(st: CK) -> CK:
-  match st:
-    case CKGo{archive, root, verbose, preserve, fmt, paths}:
-      CKWantDir{archive, verbose, preserve, fmt, paths}
-    case CKWantFile{root, verbose, preserve, fmt, paths}:
-      CKWantDir{None{}, verbose, preserve, fmt, paths}
-    case CKWantDir{archive, verbose, preserve, fmt, paths}:
-      CKWantDir{archive, verbose, preserve, fmt, paths}
-    case CKDone{archive, root, verbose, preserve, fmt, paths}:
-      CKWantDir{archive, verbose, preserve, fmt, paths}
-    case CKBad{}:
-      CKBad{}
-
-def cbund_dir(t: List<&2, U32>, st: CK) -> CK:
-  match t:
-    case Nil{}:
-      ck_dir_from(st)
-    case _ <> _:
-      CKBad{}
-
-def ck_file_from(st: CK) -> CK:
-  match st:
-    case CKGo{archive, root, verbose, preserve, fmt, paths}:
-      CKWantFile{root, verbose, preserve, fmt, paths}
-    case CKWantFile{root, verbose, preserve, fmt, paths}:
-      CKWantFile{root, verbose, preserve, fmt, paths}
-    case CKWantDir{archive, verbose, preserve, fmt, paths}:
-      CKWantFile{None{}, verbose, preserve, fmt, paths}
-    case CKDone{archive, root, verbose, preserve, fmt, paths}:
-      CKWantFile{root, verbose, preserve, fmt, paths}
-    case CKBad{}:
-      CKBad{}
-
-def cbund_fin(t: List<&2, U32>, st: CK) -> CK:
-  match t:
-    case Nil{}:
-      ck_file_from(st)
-    case _ <> _:
-      CKBad{}
-
-def ck_preserve_set(st: CK) -> CK:
-  match st:
-    case CKGo{archive, root, verbose, preserve, fmt, paths}:
-      CKGo{archive, root, verbose, True{}, fmt, paths}
-    case CKWantFile{root, verbose, preserve, fmt, paths}:
-      CKWantFile{root, verbose, True{}, fmt, paths}
-    case CKWantDir{archive, verbose, preserve, fmt, paths}:
-      CKWantDir{archive, verbose, True{}, fmt, paths}
-    case CKDone{archive, root, verbose, preserve, fmt, paths}:
-      CKDone{archive, root, verbose, True{}, fmt, paths}
-    case CKBad{}:
-      CKBad{}
-
-def cbund(fuel: Nat, rest: List<&2, U32>, st: CK) -> CK:
-  match fuel:
-    case 0n:
-      CKBad{}
-    case 1n+p:
-      match rest:
-        case Nil{}:
-          ck_to_go(st)
-        case +h <> t:
-          match h:
-            case 99:
-              cbund(p, t, st)
-            case 118:
-              cbund(p, t, ck_verbose_set(st))
-            case 112:
-              cbund(p, t, ck_preserve_set(st))
-            case 102:
-              cbund_fin(t, st)
-            case 67:
-              cbund_dir(t, st)
-            case _:
-              CKBad{}
-
-def ck_archive(st: CK) -> Maybe<&2, List<&2, U32>>:
-  match st:
-    case CKGo{archive, root, verbose, preserve, fmt, paths}:
-      archive
-    case CKWantFile{root, verbose, preserve, fmt, paths}:
-      None{}
-    case CKWantDir{archive, verbose, preserve, fmt, paths}:
-      archive
-    case CKDone{archive, root, verbose, preserve, fmt, paths}:
-      archive
-    case CKBad{}:
-      None{}
-
 def app_pl(xs: List<&2, List<&2, U32>>,
   ys: List<&2, List<&2, U32>>) -> List<&2, List<&2, U32>>:
   match xs:
@@ -1415,107 +416,21 @@ def app_pl(xs: List<&2, List<&2, U32>>,
     case h <> t:
       h <> app_pl(t, ys)
 
-def one_p(tok: List<&2, U32>) -> List<&2, List<&2, U32>>:
-  tok <> Nil{}
+def ys_ops(ys: List<&2, List<&2, U32>>) -> List<&1, List<&2, U32>>:
+  match ys:
+    case Nil{}:
+      Nil{}
+    case h <> t:
+      h <> ys_ops(t)
 
-def cpaths_add(paths: List<&2, List<&2, U32>>, tok: List<&2, U32>) ->
-  List<&2, List<&2, U32>>:
-  app_pl(paths, one_p(tok))
-
-def cpos(archive: Maybe<&2, List<&2, U32>>, +st: CK,
-  tok: List<&2, U32>) -> CK:
-  match archive:
-    case Some{a}:
-      CKGo{Some{a}, ck_root(st), ck_verbose(st), ck_preserve(st),
-        ck_fmt(st), cpaths_add(ck_paths(st), tok)}
-    case None{}:
-      CKGo{Some{tok}, ck_root(st), ck_verbose(st), ck_preserve(st),
-        ck_fmt(st), ck_paths(st)}
-
-def cstep(code: U32, +st: CK, tok: List<&2, U32>) -> CK:
-  match code:
-    case 1:
-      CKWantFile{ck_root(st), ck_verbose(st), ck_preserve(st), ck_fmt(st),
-        ck_paths(st)}
-    case 2:
-      CKWantDir{ck_archive(st), ck_verbose(st), ck_preserve(st), ck_fmt(st),
-        ck_paths(st)}
-    case 3:
-      ck_verbose_set(st)
-    case 4:
-      ck_preserve_set(st)
-    case 5:
-      ck_fmt_set(st, 1)
-    case 6:
-      ck_fmt_set(st, 2)
-    case 7:
-      cbund(256n, drop_n(1n, tok), st)
-    case 8:
-      cpos(ck_archive(st), st, tok)
-    case _:
-      CKBad{}
-
-def ifc(c: Bool, t: Unit -> U32, f: Unit -> U32) -> U32:
-  match c:
-    case True{}:
-      t(Unit{})
-    case False{}:
-      f(Unit{})
-
-def ctok9(+tok: List<&2, U32>) -> U32:
-  ifc(starts(tok, bstr("-")), u => 7, u => 8)
-
-def ctok8(+tok: List<&2, U32>) -> U32:
-  ifc(beq(tok, bstr("--format=pax")), u => 6, u => ctok9(tok))
-
-def ctok7(+tok: List<&2, U32>) -> U32:
-  ifc(beq(tok, bstr("--format=ustar")), u => 5, u => ctok8(tok))
-
-def ctok6(+tok: List<&2, U32>) -> U32:
-  ifc(beq(tok, bstr("-f")), u => 1, u => ctok7(tok))
-
-def ctok5(+tok: List<&2, U32>) -> U32:
-  ifc(beq(tok, bstr("-p")), u => 4, u => ctok6(tok))
-
-def ctok4(+tok: List<&2, U32>) -> U32:
-  ifc(beq(tok, bstr("-v")), u => 3, u => ctok5(tok))
-
-def ctok3(+tok: List<&2, U32>) -> U32:
-  ifc(beq(tok, bstr("-C")), u => 2, u => ctok4(tok))
-
-def ctok(+tok: List<&2, U32>) -> U32:
-  ctok3(tok)
-
-def cscan(fuel: Nat, st: CK, argv: List<&1, List<&2, U32>>) -> IO(COpts):
-  match fuel:
-    case 0n:
-      IO.die(COpts, 2, "btar: argument list too long")
-    case 1n+p:
-      match st:
-        case CKBad{}:
-          IO.die(COpts, 2, cusage())
-        case CKDone{archive, root, verbose, preserve, fmt, paths}:
-          cdone(archive, root, verbose, preserve, fmt, paths)
-        case CKWantFile{root, verbose, preserve, fmt, paths}:
-          match argv:
-            case Nil{}:
-              IO.die(COpts, 2, cusage())
-            case h <> t:
-              cscan(p, CKGo{Some{h}, root, verbose, preserve, fmt, paths}, t)
-        case CKWantDir{archive, verbose, preserve, fmt, paths}:
-          match argv:
-            case Nil{}:
-              IO.die(COpts, 2, cusage())
-            case h <> t:
-              cscan(p, CKGo{archive, Some{h}, verbose, preserve, fmt, paths},
-                t)
-        case CKGo{archive, root, verbose, preserve, fmt, paths}:
-          match argv:
-            case Nil{}:
-              cscan(p, CKDone{archive, root, verbose, preserve, fmt, paths},
-                Nil{})
-            case +h <> t:
-              cscan(p, cstep(ctok(h), st, h), t)
+# -T names become trailing operands (after every option has been lifted out).
+def app_ops(xs: List<&1, List<&2, U32>>, ys: List<&2, List<&2, U32>>) ->
+  List<&1, List<&2, U32>>:
+  match xs:
+    case Nil{}:
+      ys_ops(ys)
+    case h <> t:
+      h <> app_ops(t, ys)
 
 def ops_or_dot(paths: List<&2, List<&2, U32>>) ->
   List<&2, List<&2, U32>>:
@@ -1601,100 +516,27 @@ def c_root_bytes(root: Maybe<&2, List<&2, U32>>) -> List<&2, U32>:
     case None{}:
       bstr(".")
 
-def run_create(o: COpts, gz: Bool, wo: Wr.Wo) -> IO(Unit):
+# `-f -` means stdout when creating and stdin when reading (GNU).
+def dash_map(isdash: Bool, std: String, +p: List<&2, U32>) -> List<&2, U32>:
+  match isdash:
+    case True{}:
+      bstr(std)
+    case False{}:
+      p
+
+def arch_out(+p: List<&2, U32>) -> List<&2, U32>:
+  dash_map(beq(p, bstr("-")), "/dev/stdout", p)
+
+def arch_in(+p: List<&2, U32>) -> List<&2, U32>:
+  dash_map(beq(p, bstr("-")), "/dev/stdin", p)
+
+def run_create(o: COpts, gz: Bool, +wo: Wr.Wo) -> IO(Unit):
   match o:
     case MkCOpts{archive, root, verbose, preserve, fmt, paths}:
-      cgate_gz(gz, c_root_bytes(root), archive,
-        Wr.MkCfg{fmt, preserve, verbose}, paths, wo)
+      cgate_gz(gz, c_root_bytes(root), arch_out(archive),
+        Wr.MkCfg{fmt, preserve, verbose, Wr.wo_xf(wo), Wr.wo_ov(wo)}, paths, wo)
 
 # ---- v1.2 append / update (-r / -u) -------------------------------------
-
-# Bits: 1 = -r / --append seen, 2 = -u / --update seen (letters only in
-# single-dash bundles).
-def chas_ch(fuel: Nat, xs: List<&2, U32>, found: Bool, +ch: U32) -> Bool:
-  match fuel:
-    case 0n:
-      found
-    case 1n+p:
-      match xs:
-        case Nil{}:
-          found
-        case +h <> t:
-          chas_ch(p, t, Bool.or(found, U32.is_eq(h, ch)), ch)
-
-def ru_bits2(single: Bool, +tok: List<&2, U32>) -> U32:
-  match single:
-    case True{}:
-      U32.or(Bool.pick(U32, chas_ch(256n, tok, False{}, 114), 1, 0),
-        Bool.pick(U32, chas_ch(256n, tok, False{}, 117), 2, 0))
-    case False{}:
-      0
-
-def ru_bits(+tok: List<&2, U32>) -> U32:
-  U32.or(ru_bits2(Bool.and(starts(tok, bstr("-")),
-    Bool.not(starts(tok, bstr("--")))), tok),
-    U32.or(Bool.pick(U32, beq(tok, bstr("--append")), 1, 0),
-      Bool.pick(U32, beq(tok, bstr("--update")), 2, 0)))
-
-def ru_scan(fuel: Nat, acc: U32, argv: List<&1, List<&2, U32>>) -> U32:
-  match fuel:
-    case 0n:
-      acc
-    case 1n+p:
-      match argv:
-        case Nil{}:
-          acc
-        case h <> t:
-          ru_scan(p, U32.or(acc, ru_bits(h)), t)
-
-def drop_ru(fuel: Nat, xs: List<&2, U32>, acc: List<&2, U32>) ->
-  List<&2, U32>:
-  match fuel:
-    case 0n:
-      acc
-    case 1n+p:
-      match xs:
-        case Nil{}:
-          acc
-        case +h <> t:
-          drop_ru(p, t, drop_z_ch(
-            Bool.or(U32.is_eq(h, 114), U32.is_eq(h, 117)), h, acc))
-
-def ru_tok2(single: Bool, +tok: List<&2, U32>) -> FZ:
-  match single:
-    case True{}:
-      fz_short(drop_ru(256n, tok, Nil{}))
-    case False{}:
-      FZKeep{tok}
-
-def ru_tok3(long: Bool, +tok: List<&2, U32>) -> FZ:
-  match long:
-    case True{}:
-      FZDrop{}
-    case False{}:
-      ru_tok2(Bool.and(starts(tok, bstr("-")),
-        Bool.not(starts(tok, bstr("--")))), tok)
-
-def ru_tok(+tok: List<&2, U32>) -> FZ:
-  ru_tok3(Bool.or(beq(tok, bstr("--append")), beq(tok, bstr("--update"))),
-    tok)
-
-def tag_ru(fuel: Nat, argv: List<&1, List<&2, U32>>) -> List<&1, FZ>:
-  match fuel:
-    case 0n:
-      Nil{}
-    case 1n+p:
-      match argv:
-        case Nil{}:
-          Nil{}
-        case h <> t:
-          ru_tok(h) <> tag_ru(p, t)
-
-# -r / -u letters are consumed here; the rest of the cluster (-rf, -uvf) goes
-# through the create option parser.
-def filter_ru(+fuel: Nat, argv: List<&1, List<&2, U32>>) ->
-  List<&1, List<&2, U32>>:
-  untag(fuel, tag_ru(fuel, argv))
 
 def ap_pos(pr: File & Result<&1, &1, U32 & String, U32>,
   selfid: List<&2, U32>, rootb: List<&2, U32>, ents: List<&2, Wr.Ent>,
@@ -1749,35 +591,32 @@ def append_go(+rootb: List<&2, U32>, archive: List<&2, U32>, +cfg: Wr.WCfg,
       Fx.Fs.fstatx(a)
     ap_write(pr, Ap.scan_end(sc), rootb, ents, cfg)
 
-def run_append(o: COpts, wo: Wr.Wo, upd: Bool) -> IO(Unit):
+def run_append(o: COpts, +wo: Wr.Wo, upd: Bool) -> IO(Unit):
   match o:
     case MkCOpts{archive, root, verbose, preserve, fmt, paths}:
       append_go(c_root_bytes(root), archive,
-        Wr.MkCfg{fmt, preserve, verbose}, paths, wo, upd)
+        Wr.MkCfg{fmt, preserve, verbose, Wr.wo_xf(wo), Wr.wo_ov(wo)}, paths, wo, upd)
 
-def ru_parse(wo: Wr.Wo, upd: Bool,
-  argv: List<&1, List<&2, U32>>) -> IO(Unit):
-  do IO<Unit>:
-    o : COpts <- cscan(2048n,
-      CKGo{None{}, None{}, False{}, False{}, 0, Nil{}}, argv)
-    run_append(o, wo, upd)
-
-def ru_gate(create: Bool, gz: Bool, wo: Wr.Wo, mode: U32,
-  argv: List<&1, List<&2, U32>>) -> IO(Unit):
-  match create:
+# -A / --delete: the archive operand is rewritten in place; operands are
+# archives (-A) or member names (--delete), taken verbatim.
+def rw_pick(del: Bool, +arch: List<&2, U32>,
+  ops: List<&2, List<&2, U32>>) -> IO(Unit):
+  match del:
     case True{}:
-      IO.die(Unit, 2, "btar: you may not specify more than one of -c, -r, -u")
+      Rw.delete_go(arch, ops)
     case False{}:
-      match gz:
-        case True{}:
-          IO.die(Unit, 2, "btar: cannot update a compressed archive " ++
-            "(-r/-u do not work with -z)")
-        case False{}:
-          match mode:
-            case 3:
-              IO.die(Unit, 2, "btar: you may not specify both -r and -u")
-            case _:
-              ru_parse(wo, U32.is_eq(mode, 2), argv)
+      Rw.concat_go(arch, ops)
+
+def rw_go(del: Bool, +arch: List<&2, U32>,
+  ops: List<&2, List<&2, U32>>) -> IO(Unit):
+  do IO<Unit>:
+    g : Unit <- dash_guard(arch)
+    rw_pick(del, arch, ops)
+
+def rw_run(del: Bool, o: COpts) -> IO(Unit):
+  match o:
+    case MkCOpts{archive, root, verbose, preserve, fmt, paths}:
+      rw_go(del, archive, paths)
 
 def run_reader(ad: File & Gzio.Dr, rp: List<&2, U32>, s: File,
   cfg: R.Cfg) -> IO(Unit):
@@ -1786,12 +625,13 @@ def run_reader(ad: File & Gzio.Dr, rp: List<&2, U32>, s: File,
     r : Unit <- R.run(a2, rp, s, cfg, 134217728n)
     Gzio.inflate_finish(d)
 
-def run_opts(o: Opts, gz: Bool, exc: List<&2, List<&2, U32>>) -> IO(Unit):
+def run_opts(o: Opts, gz: Bool, exc: List<&2, List<&2, U32>>,
+  xf: List<&2, Xf.Xc>, ctl: U32, +mem: List<&2, List<&2, U32>>) -> IO(Unit):
   match o:
     case MkOpts{+archive, extract, to_stdout, root, +onetop, strip,
         verbose, preserve}:
       do IO<Unit>:
-        +arch : List<&2, U32> = archive
+        +arch : List<&2, U32> = arch_in(archive)
         g : Unit <- arch_open_guard(arch)
         a : File <- IO.try(File, File.open_bytes(arch, "r"))
         ad : File & Gzio.Dr <- gz_prepare(a, gz)
@@ -1800,149 +640,7 @@ def run_opts(o: Opts, gz: Bool, exc: List<&2, List<&2, U32>>) -> IO(Unit):
         +rp : List<&2, U32> = root_path(root, onetop, arch)
         mk : Unit <- mk_root(onetop, rp)
         run_reader(ad, rp, s, R.MkCfg{extract, strip, verbose, preserve,
-          to_stdout, u, False{}, exc})
-
-def main_plain(create: Bool, gz: Bool, wo: Wr.Wo,
-  argv: List<&1, List<&2, U32>>) -> IO(Unit):
-  match create:
-    case True{}:
-      do IO<Unit>:
-        o : COpts <- cscan(2048n,
-          CKGo{None{}, None{}, False{}, False{}, 0, Nil{}}, argv)
-        run_create(o, gz, wo)
-    case False{}:
-      do IO<Unit>:
-        o : Opts <- walk(2048n,
-          PStart{False{}, False{}, False{}, False{}, False{}, 0, None{},
-            None{}, OtNo{}}, argv)
-        run_opts(o, gz, Wr.wo_exc(wo))
-
-def main_dispatch(create: Bool, gz: Bool, wo: Wr.Wo, mode: U32,
-  argv: List<&1, List<&2, U32>>) -> IO(Unit):
-  match mode:
-    case 0:
-      main_plain(create, gz, wo, argv)
-    case _:
-      ru_gate(create, gz, wo, mode, argv)
-
-# ---- v1.2 --exclude / --exclude-from / -X / --no-recursion ----------------
-#
-# These tokens are lifted out of argv before every other scan (a pattern such
-# as '*.zip' must not look like -z).  Patterns from the command line are kept
-# verbatim; --exclude-from files are split into lines, trailing whitespace is
-# stripped and empty lines are dropped (GNU behavior).  Not supported: -X
-# inside a bundle (-cXf), --exclude-vcs, --anchored/--wildcards variants.
-
-type Xo is Data:
-  XKeep{tok: List<&2, U32>}
-  XPat{tok: List<&2, U32>}
-  XFrom{tok: List<&2, U32>}
-  XNoRec{}
-  XDrop{}
-
-def xo_cls(+tok: List<&2, U32>) -> Xo:
-  Bool.pick(Xo, starts(tok, bstr("--exclude=")), XPat{drop_n(10n, tok)},
-    Bool.pick(Xo, starts(tok, bstr("--exclude-from=")),
-      XFrom{drop_n(15n, tok)},
-      Bool.pick(Xo, beq(tok, bstr("--no-recursion")), XNoRec{},
-        Bool.pick(Xo, Bool.or(beq(tok, bstr("--exclude")),
-          Bool.or(beq(tok, bstr("--exclude-from")), beq(tok, bstr("-X")))),
-          XDrop{}, XKeep{tok}))))
-
-# want: 0 = none, 1 = next token is a pattern, 2 = next token is a pattern file.
-def xo_want(want: U32, +tok: List<&2, U32>) -> U32:
-  match want:
-    case 0:
-      Bool.pick(U32, beq(tok, bstr("--exclude")), 1,
-        Bool.pick(U32, Bool.or(beq(tok, bstr("--exclude-from")),
-          beq(tok, bstr("-X"))), 2, 0))
-    case _:
-      0
-
-def xo_tok(want: U32, +tok: List<&2, U32>) -> Xo:
-  match want:
-    case 0:
-      xo_cls(tok)
-    case 1:
-      XPat{tok}
-    case _:
-      XFrom{tok}
-
-def tag_x(fuel: Nat, +want: U32, argv: List<&1, List<&2, U32>>) ->
-  List<&1, Xo>:
-  match fuel:
-    case 0n:
-      Nil{}
-    case 1n+p:
-      match argv:
-        case Nil{}:
-          Nil{}
-        case +h <> t:
-          xo_tok(want, h) <> tag_x(p, xo_want(want, h), t)
-
-def keep_x(fuel: Nat, xs: List<&1, Xo>) -> List<&1, List<&2, U32>>:
-  match fuel:
-    case 0n:
-      Nil{}
-    case 1n+p:
-      match xs:
-        case Nil{}:
-          Nil{}
-        case h <> t:
-          match h:
-            case XKeep{tok}:
-              tok <> keep_x(p, t)
-            case _:
-              keep_x(p, t)
-
-def pats_x(fuel: Nat, xs: List<&1, Xo>) -> List<&2, List<&2, U32>>:
-  match fuel:
-    case 0n:
-      Nil{}
-    case 1n+p:
-      match xs:
-        case Nil{}:
-          Nil{}
-        case h <> t:
-          match h:
-            case XPat{tok}:
-              tok <> pats_x(p, t)
-            case _:
-              pats_x(p, t)
-
-def files_x(fuel: Nat, xs: List<&1, Xo>) -> List<&2, List<&2, U32>>:
-  match fuel:
-    case 0n:
-      Nil{}
-    case 1n+p:
-      match xs:
-        case Nil{}:
-          Nil{}
-        case h <> t:
-          match h:
-            case XFrom{tok}:
-              tok <> files_x(p, t)
-            case _:
-              files_x(p, t)
-
-def norec_x(fuel: Nat, xs: List<&1, Xo>) -> Bool:
-  match fuel:
-    case 0n:
-      False{}
-    case 1n+p:
-      match xs:
-        case Nil{}:
-          False{}
-        case h <> t:
-          match h:
-            case XNoRec{}:
-              True{}
-            case _:
-              norec_x(p, t)
-
-def filter_x(+fuel: Nat, argv: List<&1, List<&2, U32>>) ->
-  List<&1, List<&2, U32>>:
-  keep_x(fuel, tag_x(fuel, 0, argv))
+          to_stdout, u, 0, exc, mem, mem, xf, ctl, 19})
 
 def ws_byte(+b: U32) -> Bool:
   Bool.or(U32.is_eq(b, 32), Bool.and(U32.is_ge(b, 9), U32.is_le(b, 13)))
@@ -1970,112 +668,103 @@ def line_keep(ln: List<&2, U32>, acc: List<&2, List<&2, U32>>) ->
     case h <> t:
       (h <> t) <> acc
 
-def line_flush(+cur: List<&2, U32>, acc: List<&2, List<&2, U32>>) ->
+# `tr`: strip trailing whitespace (--exclude-from); -T names are taken verbatim.
+def line_flush(+tr: Bool, +cur: List<&2, U32>, acc: List<&2, List<&2, U32>>) ->
   List<&2, List<&2, U32>>:
-  line_keep(trim_ws(B.list_rev(cur, Nil{})), acc)
+  line_keep(Bool.pick(List<&2, U32>, tr, trim_ws(B.list_rev(cur, Nil{})),
+    B.list_rev(cur, Nil{})), acc)
 
 # One pass over the file bytes; `cur` is the current line, reversed.
-def split_nl(fuel: Nat, xs: List<&2, U32>, +cur: List<&2, U32>,
+def split_nl(+tr: Bool, fuel: Nat, xs: List<&2, U32>, +cur: List<&2, U32>,
   +acc: List<&2, List<&2, U32>>) -> List<&2, List<&2, U32>>:
   match fuel:
     case 0n:
-      line_flush(cur, acc)
+      line_flush(tr, cur, acc)
     case 1n+p:
       match xs:
         case Nil{}:
-          line_flush(cur, acc)
+          line_flush(tr, cur, acc)
         case +h <> t:
           +nl = U32.is_eq(h, 10)
-          split_nl(p, t, Bool.pick(List<&2, U32>, nl, Nil{}, h <> cur),
-            Bool.pick(List<&2, List<&2, U32>>, nl, line_flush(cur, acc), acc))
+          split_nl(tr, p, t, Bool.pick(List<&2, U32>, nl, Nil{}, h <> cur),
+            Bool.pick(List<&2, List<&2, U32>>, nl, line_flush(tr, cur, acc), acc))
 
-def pf_lines(+data: List<&2, U32>) -> List<&2, List<&2, U32>>:
-  split_nl(Nat.add(List.length(&2, U32, data), 1n), data, Nil{}, Nil{})
+def rev_pl(xs: List<&2, List<&2, U32>>, acc: List<&2, List<&2, U32>>) ->
+  List<&2, List<&2, U32>>:
+  match xs:
+    case Nil{}:
+      acc
+    case h <> t:
+      rev_pl(t, h <> acc)
 
-def pf_after(pr: File & Result<&1, &1, U32 & String, List<&2, U32>>) ->
+# Lines come out of split_nl newest-first; restore file order (matters for -T).
+def pf_lines(+tr: Bool, +data: List<&2, U32>) -> List<&2, List<&2, U32>>:
+  rev_pl(split_nl(tr, Nat.add(List.length(&2, U32, data), 1n), data, Nil{},
+    Nil{}), Nil{})
+
+def pf_after(+tr: Bool, +lbl: String, pr: File & Result<&1, &1, U32 & String, List<&2, U32>>) ->
   IO(List<&2, List<&2, U32>>):
   (f, r) = pr
   match r:
     case Fail{(code, msg)}:
-      IO.die(List<&2, List<&2, U32>>, 2, "btar: --exclude-from: " ++ msg)
+      IO.die(List<&2, List<&2, U32>>, 2, "btar: " ++ lbl ++ ": " ++ msg)
     case Done{data}:
       do IO<List<&2, List<&2, U32>>>:
         u : Unit <- File.close(f)
-        IO.pure(List<&2, List<&2, U32>>, pf_lines(data))
+        IO.pure(List<&2, List<&2, U32>>, pf_lines(tr, data))
 
-def pf_opened(r: Result<&1, &1, U32 & String, File>,
+def pf_opened(+tr: Bool, +lbl: String, r: Result<&1, &1, U32 & String, File>,
   +path: List<&2, U32>) -> IO(List<&2, List<&2, U32>>):
   match r:
     case Fail{(code, msg)}:
-      IO.die(List<&2, List<&2, U32>>, 2, "btar: --exclude-from: cannot open '" ++
+      IO.die(List<&2, List<&2, U32>>, 2, "btar: " ++ lbl ++ ": cannot open '" ++
         Wr.bytes_str(path) ++ "': " ++ msg)
     case Done{f}:
       do IO<List<&2, List<&2, U32>>>:
         pr : File & Result<&1, &1, U32 & String, List<&2, U32>> <-
           Fx.Stream.read_file(f)
-        pf_after(pr)
+        pf_after(tr, lbl, pr)
 
-def pf_read(+path: List<&2, U32>) -> IO(List<&2, List<&2, U32>>):
+def pf_read(+tr: Bool, +lbl: String, +path: List<&2, U32>) -> IO(List<&2, List<&2, U32>>):
   do IO<List<&2, List<&2, U32>>>:
     r : Result<&1, &1, U32 & String, File> <- File.open_bytes(path, "r")
-    pf_opened(r, path)
+    pf_opened(tr, lbl, r, path)
 
-def pf_all(fuel: Nat, files: List<&2, List<&2, U32>>,
+def pf_all(+tr: Bool, +lbl: String, fuel: Nat, files: List<&2, List<&2, U32>>,
   acc: List<&2, List<&2, U32>>) -> IO(List<&2, List<&2, U32>>):
   match fuel:
     case 0n:
-      IO.die(List<&2, List<&2, U32>>, 2, "btar: too many --exclude-from files")
+      IO.die(List<&2, List<&2, U32>>, 2, "btar: too many " ++ lbl ++ " files")
     case 1n+p:
       match files:
         case Nil{}:
           IO.pure(List<&2, List<&2, U32>>, acc)
         case h <> t:
           do IO<List<&2, List<&2, U32>>>:
-            ls : List<&2, List<&2, U32>> <- pf_read(h)
-            pf_all(p, t, app_pl(acc, ls))
+            ls : List<&2, List<&2, U32>> <- pf_read(tr, lbl, h)
+            pf_all(tr, lbl, p, t, app_pl(acc, ls))
 
-def run_main() -> IO(Unit):
-  do IO<Unit>:
-    a1 : List<&1, List<&2, U32>> <- IO.args_bytes()
-    +gz : Bool = has_z(256n, False{}, filter_x(256n, drop_prog(a1)))
-    a2 : List<&1, List<&2, U32>> <- IO.args_bytes()
-    +sc : Bool = scan_create(256n, False{},
-      filter_z(256n, filter_x(256n, drop_prog(a2))))
-    a3 : List<&1, List<&2, U32>> <- IO.args_bytes()
-    +sortf : Bool = any_drop(256n,
-      tag_s(256n, filter_z(256n, filter_x(256n, drop_prog(a3)))))
-    a4 : List<&1, List<&2, U32>> <- IO.args_bytes()
-    +md : U32 = ru_scan(256n, 0,
-      filter_z(256n, filter_x(256n, drop_prog(a4))))
-    a6 : List<&1, List<&2, U32>> <- IO.args_bytes()
-    +pats : List<&2, List<&2, U32>> = pats_x(256n,
-      tag_x(256n, 0, drop_prog(a6)))
-    a7 : List<&1, List<&2, U32>> <- IO.args_bytes()
-    +files : List<&2, List<&2, U32>> = files_x(256n,
-      tag_x(256n, 0, drop_prog(a7)))
-    a8 : List<&1, List<&2, U32>> <- IO.args_bytes()
-    +nr : Bool = norec_x(256n, tag_x(256n, 0, drop_prog(a8)))
-    fl : List<&2, List<&2, U32>> <- pf_all(4096n, files, Nil{})
-    a5 : List<&1, List<&2, U32>> <- IO.args_bytes()
-    main_dispatch(sc, gz, Wr.MkWo{sortf, U.TNil{}, app_pl(pats, fl), nr}, md,
-      filter_ru(256n, strip_sort(256n,
-        filter_z(256n, filter_x(256n, drop_prog(a5))))))
+def xf_one(pe: Xf.Pe) -> IO(Xf.Xc):
+  match pe:
+    case Xf.PeErr{msg}:
+      IO.die(Xf.Xc, 2, "btar: " ++ msg)
+    case Xf.PeOk{xc}:
+      IO.pure(Xf.Xc, xc)
 
-def dash_gate(dash: Bool) -> IO(Unit):
-  match dash:
-    case True{}:
-      do IO<Unit>:
-        u : Unit <- IO.print_err(
-          "btar: '-' (stdin/stdout) is not supported as an archive or " ++
-          "operand in v1")
-        IO.exit(2)
-    case False{}:
-      run_main()
-
-def dash_or_run() -> IO(Unit):
-  do IO<Unit>:
-    a : List<&1, List<&2, U32>> <- IO.args_bytes()
-    dash_gate(has_dash(256n, filter_x(256n, drop_prog(a))))
+def xf_all(fuel: Nat, exprs: List<&2, List<&2, U32>>) ->
+  IO(List<&2, Xf.Xc>):
+  match fuel:
+    case 0n:
+      IO.die(List<&2, Xf.Xc>, 2, "btar: too many --transform expressions")
+    case 1n+p:
+      match exprs:
+        case Nil{}:
+          IO.pure(List<&2, Xf.Xc>, Nil{})
+        case e <> t:
+          do IO<List<&2, Xf.Xc>>:
+            c : Xf.Xc <- xf_one(Xf.parse(e))
+            rest : List<&2, Xf.Xc> <- xf_all(p, t)
+            IO.pure(List<&2, Xf.Xc>, c <> rest)
 
 def gz_async(pr: File & Result<&1, &1, U32 & String, Unit>) -> IO(Unit):
   (f, r) = pr
@@ -2090,16 +779,405 @@ def gz_async(pr: File & Result<&1, &1, U32 & String, Unit>) -> IO(Unit):
 def wbytes_pair(pr: File & Result<&1, &1, U32 & String, Unit>) -> IO(Unit):
   gz_async(pr)
 
-def version_gate(v: Bool) -> IO(Unit):
-  match v:
+
+
+# ---- command line -> operation -------------------------------------------------------
+#
+# app/cli.bend parses argv into ordered items (table driven, GNU syntax); this section
+# turns them into the arguments of the operation runners above.
+
+def usage() -> String:
+  "Usage: btar [OPTION...] [FILE]...\n" ++
+  "  btar -c|-r|-u -f ARCHIVE [-C DIR] [FILE...]   create / append / update\n" ++
+  "  btar -t|-x -f ARCHIVE [-C DIR] [MEMBER...]    list / extract\n" ++
+  "  btar -A -f DEST SRC...   |   btar --delete -f ARCHIVE MEMBER...\n" ++
+  "Common: -v -z -O -p -T FILE -X FILE --exclude=PAT --transform=EXPR\n" ++
+  "        --strip-components=N --one-top-level[=DIR] --sort=name --format=ustar|pax\n" ++
+  "        --no-recursion;  -f - is stdin/stdout.  Other GNU options are parsed and\n" ++
+  "        refused with exit status 2 until implemented (docs/format-support.md)."
+
+def die_usage(msg: String) -> IO(Unit):
+  IO.die(Unit, 2, "btar: " ++ msg ++
+    "\nTry 'btar --help' or 'btar --usage' for more information.")
+
+def print_exit(msg: String) -> IO(Unit):
+  do IO<Unit>:
+    u : Unit <- IO.print(msg)
+    IO.exit(0)
+
+# Operation bits: 1 -A, 2 -c, 4 -d, 8 --delete, 16 -r, 32 -t, 64 -u, 128 -x, 256 --test-label.
+def op_bit(+items: List<&2, T.Item>, +id1: U32, +id2: U32, +id3: U32,
+  +bit: U32) -> U32:
+  Bool.pick(U32, Bool.or(Cl.has_opt(items, id1),
+    Bool.or(Cl.has_opt(items, id2), Cl.has_opt(items, id3))), bit, 0)
+
+def op_mask(+items: List<&2, T.Item>) -> U32:
+  U32.or(op_bit(items, Tb.o_catenate(), Tb.o_concat(), 0, 1),
+  U32.or(op_bit(items, Tb.o_create(), 0, 0, 2),
+  U32.or(op_bit(items, Tb.o_diff(), Tb.o_compare(), 0, 4),
+  U32.or(op_bit(items, Tb.o_delete(), 0, 0, 8),
+  U32.or(op_bit(items, Tb.o_append(), 0, 0, 16),
+  U32.or(op_bit(items, Tb.o_list(), 0, 0, 32),
+  U32.or(op_bit(items, Tb.o_update(), 0, 0, 64),
+  U32.or(op_bit(items, Tb.o_extract(), Tb.o_get(), 0, 128),
+    op_bit(items, Tb.o_test_label(), 0, 0, 256)))))))))
+
+def refused_pick(hit: Bool, +id: U32, rest: Maybe<&2, String>) ->
+  Maybe<&2, String>:
+  match hit:
     case True{}:
-      do IO<Unit>:
-        u : Unit <- IO.print("btar 1.2.0")
-        IO.pure(Unit, Unit{})
+      Some{"option '" ++ Tb.long_name(id) ++ "' is not implemented yet"}
     case False{}:
-      dash_or_run()
+      rest
+
+def first_refused(+items: List<&2, T.Item>) -> Maybe<&2, String>:
+  match items:
+    case Nil{}:
+      None{}
+    case T.IOpt{id, _} <> t:
+      refused_pick(Tb.refused(id), id, first_refused(t))
+    case _ <> t:
+      first_refused(t)
+
+def or_default(m: Maybe<&2, List<&2, U32>>, d: List<&2, U32>) ->
+  List<&2, U32>:
+  match m:
+    case Some{v}:
+      v
+    case None{}:
+      d
+
+# --format: 0 default, 1 ustar, 2 pax; anything else is not implemented.
+def fmt_code(m: Maybe<&2, List<&2, U32>>) -> U32:
+  match m:
+    case None{}:
+      0
+    case Some{+v}:
+      Bool.pick(U32, beq(v, bstr("ustar")), 1,
+        Bool.pick(U32, Bool.or(beq(v, bstr("pax")), beq(v, bstr("posix"))), 2,
+          99))
+
+def strip_of(m: Maybe<&2, List<&2, U32>>) -> Maybe<&2, U32>:
+  match m:
+    case None{}:
+      Some{0}
+    case Some{v}:
+      parse_u32_bytes(v)
+
+def onetop_of(m: Maybe<&2, Maybe<&2, List<&2, U32>>>) -> OneTop:
+  match m:
+    case None{}:
+      OtNo{}
+    case Some{a}:
+      match a:
+        case None{}:
+          OtAuto{}
+        case Some{d}:
+          OtDir{d}
+
+def any_gz(+items: List<&2, T.Item>) -> Bool:
+  Bool.or(Cl.has_opt(items, Tb.o_gzip()),
+    Bool.or(Cl.has_opt(items, Tb.o_gunzip()),
+      Cl.has_opt(items, Tb.o_ungzip())))
+
+# The pieces every runner needs, as one record.
+type Run is Data:
+  MkRun{mode: U32, gz: Bool, co: COpts, op: Opts, wo: Wr.Wo,
+    ops: List<&2, List<&2, U32>>, xf: List<&2, Xf.Xc>, ctl: U32}
+
+def go_gz(gz: Bool, upd_msg: String, k: IO(Unit)) -> IO(Unit):
+  match gz:
+    case True{}:
+      IO.die(Unit, 2, "btar: " ++ upd_msg)
+    case False{}:
+      k
+
+def run_mode2(mode: U32, gz: Bool, co: COpts, op: Opts, wo: Wr.Wo,
+  ops: List<&2, List<&2, U32>>, xf: List<&2, Xf.Xc>, ctl: U32) -> IO(Unit):
+  match mode:
+    case 2:
+      run_create(co, gz, wo)
+    case 16:
+      go_gz(gz, "cannot update a compressed archive (-r/-u do not work with -z)",
+        run_append(co, wo, False{}))
+    case 64:
+      go_gz(gz, "cannot update a compressed archive (-r/-u do not work with -z)",
+        run_append(co, wo, True{}))
+    case 1:
+      go_gz(gz, "cannot update a compressed archive (-r/-u do not work with -z)",
+        rw_run(False{}, co))
+    case 8:
+      go_gz(gz, "cannot update a compressed archive (-r/-u do not work with -z)",
+        rw_run(True{}, co))
+    case _:
+      run_opts(op, gz, Wr.wo_exc(wo), xf, ctl, ops)
+
+def run_mode(r: Run) -> IO(Unit):
+  match r:
+    case MkRun{mode, gz, co, op, wo, ops, xf, ctl}:
+      run_mode2(mode, gz, co, op, wo, ops, xf, ctl)
+
+def mode_msg(mask: U32) -> String:
+  match mask:
+    case 0:
+      "You must specify one of the '-Acdtrux', '--delete' or '--test-label' options"
+    case 80:
+      "you may not specify both -r and -u"
+    case _:
+      "You may not specify more than one '-Acdtrux', '--delete' or '--test-label' option"
+
+def valid_mask(mask: U32) -> Bool:
+  match mask:
+    case 1:
+      True{}
+    case 2:
+      True{}
+    case 8:
+      True{}
+    case 16:
+      True{}
+    case 32:
+      True{}
+    case 64:
+      True{}
+    case 128:
+      True{}
+    case _:
+      False{}
+
+# Extraction control bits: 0-3 overwrite policy (0 replace, 1 keep-old, 2 skip-old,
+# 3 keep-newer), 16 --touch (-m).
+def ctl_of(+items: List<&2, T.Item>) -> U32:
+  U32.or(
+    Bool.pick(U32, Cl.has_opt(items, Tb.o_keep_newer_files()), 3,
+      Bool.pick(U32, Cl.has_opt(items, Tb.o_skip_old_files()), 2,
+        Bool.pick(U32, Cl.has_opt(items, Tb.o_keep_old_files()), 1, 0))),
+    U32.or(Bool.pick(U32, Cl.has_opt(items, Tb.o_touch()), 16, 0),
+      U32.or(Bool.pick(U32, Cl.has_opt(items, Tb.o_numeric_owner()), 32, 0),
+        U32.or(Bool.pick(U32, Cl.has_opt(items, Tb.o_full_time()), 64, 0),
+          Bool.pick(U32, Cl.has_opt(items, Tb.o_utc()), 128, 0)))))
+
+def launch4(badfmt: Bool, +n: U32, +fmt: U32, +items: List<&2, T.Item>,
+  +mask: U32, +wo: Wr.Wo, +ops: List<&2, List<&2, U32>>,
+  +xf: List<&2, Xf.Xc>) -> IO(Unit):
+  match badfmt:
+    case True{}:
+      die_usage("unsupported archive format (--format=ustar or pax)")
+    case False{}:
+      +arch : List<&2, U32> = or_default(Cl.opt_last(items, Tb.o_file()), bstr("-"))
+      +root : Maybe<&2, List<&2, U32>> = Cl.opt_last(items, Tb.o_directory())
+      +verbose : Bool = Cl.has_opt(items, Tb.o_verbose())
+      +preserve : Bool = Bool.or(Cl.has_opt(items, Tb.o_preserve_permissions()),
+        Cl.has_opt(items, Tb.o_same_permissions()))
+      +co : COpts = MkCOpts{arch, root, verbose, preserve, fmt, ops}
+      +op : Opts = MkOpts{arch, U32.is_eq(mask, 128), Cl.has_opt(items, Tb.o_to_stdout()),
+        root, onetop_of(Cl.opt_find(items, Tb.o_one_top_level())), n, verbose,
+        preserve}
+      run_mode(MkRun{mask, any_gz(items), co, op, wo, ops, xf, ctl_of(items)})
+
+def launch3(strip: Maybe<&2, U32>, +fmt: U32, +items: List<&2, T.Item>,
+  +mask: U32, +wo: Wr.Wo, +ops: List<&2, List<&2, U32>>,
+  +xf: List<&2, Xf.Xc>) -> IO(Unit):
+  match strip:
+    case None{}:
+      die_usage("invalid --strip-components value")
+    case Some{n}:
+      launch4(U32.is_eq(fmt, 99), n, fmt, items, mask, wo, ops, xf)
+
+def launch2(+items: List<&2, T.Item>, +mask: U32, +wo: Wr.Wo,
+  +ops: List<&2, List<&2, U32>>, +xf: List<&2, Xf.Xc>) -> IO(Unit):
+  launch3(strip_of(Cl.opt_last(items, Tb.o_strip_components())),
+    fmt_code(Cl.opt_last(items, Tb.o_format())), items, mask, wo, ops, xf)
+
+def rev_cat(xs: List<&2, List<&2, U32>>, ys: List<&2, List<&2, U32>>) ->
+  List<&2, List<&2, U32>>:
+  app_pl(xs, ys)
+
+# ---- header overrides: --owner --group --mode --mtime --numeric-owner ----------------
+
+type Idr is Data:
+  MkIdr{id: U32, name: List<&2, U32>}
+
+def ov_id3(r: Result<&1, &1, U32 & String, U32>, name: List<&2, U32>) -> IO(Idr):
+  match r:
+    case Done{id}:
+      IO.pure(Idr, MkIdr{id, name})
+    case Fail{_}:
+      IO.die(Idr, 2, "btar: invalid owner or group name")
+
+def ov_id2(kind: U32, idv: Op.Idv) -> IO(Idr):
+  match idv:
+    case Op.IdOk{id, name}:
+      IO.pure(Idr, MkIdr{id, name})
+    case Op.IdLook{+name}:
+      do IO<Idr>:
+        r : Result<&1, &1, U32 & String, U32> <- Fx.Fs.name_id(kind, name)
+        ov_id3(r, name)
+    case Op.IdBad{}:
+      IO.die(Idr, 2, "btar: invalid owner or group value")
+
+def ov_id(kind: U32, m: Maybe<&2, List<&2, U32>>) -> IO(Idr):
+  match m:
+    case None{}:
+      IO.pure(Idr, MkIdr{4294967295, Nil{}})
+    case Some{v}:
+      ov_id2(kind, Op.parse_id(v))
+
+def mt_stat(r: Result<&1, &1, U32 & String, List<&2, U32>>) -> IO(U32):
+  match r:
+    case Done{st}:
+      IO.pure(U32, N.nth(st, 6n))
+    case Fail{(code, msg)}:
+      IO.die(U32, 2, "btar: --mtime: " ++ msg)
+
+def mt_file(v: List<&2, U32>) -> IO(U32):
+  do IO<U32>:
+    r : Result<&1, &1, U32 & String, List<&2, U32>> <- Fx.Fs.stat_path(v)
+    mt_stat(r)
+
+# Dates without a zone are local time (GNU): subtract the zone offset at that time.
+def mt_local(+t: U32) -> IO(U32):
+  do IO<U32>:
+    tz : U32 <- Fx.Fs.tzoff(t)
+    IO.pure(U32, U32.sub(U32.add(t, 2147483648), tz))
+
+def mt_date(d: Op.Dt, v: List<&2, U32>) -> IO(U32):
+  match d:
+    case Op.DtOk{t}:
+      mt_local(t)
+    case Op.DtBad{}:
+      mt_file(v)
+
+def mt_epoch(ok: Bool, rest: List<&2, U32>) -> IO(U32):
+  match ok:
+    case True{}:
+      IO.pure(U32, Op.dec_acc(rest, 0))
+    case False{}:
+      IO.die(U32, 2, "btar: invalid --mtime value")
+
+def mt_str(+v: List<&2, U32>) -> IO(U32):
+  match v:
+    case 64 <> rest:
+      mt_epoch(Op.all_digits(rest), rest)
+    case 48 <> _:
+      mt_date(Op.parse_date(v), v)
+    case 49 <> _:
+      mt_date(Op.parse_date(v), v)
+    case 50 <> _:
+      mt_date(Op.parse_date(v), v)
+    case _:
+      mt_file(v)
+
+def mt_of(m: Maybe<&2, List<&2, U32>>) -> IO(U32):
+  match m:
+    case None{}:
+      IO.pure(U32, 4294967295)
+    case Some{v}:
+      mt_str(v)
+
+def mm_of(m: Maybe<&2, List<&2, U32>>) -> Op.Mm:
+  match m:
+    case None{}:
+      Op.MkMm{4294967295, 0, 0, True{}}
+    case Some{v}:
+      Op.parse_mode(v)
+
+def ov_fin2(ok: Bool, ov: Wr.Ov) -> IO(Wr.Ov):
+  match ok:
+    case True{}:
+      IO.pure(Wr.Ov, ov)
+    case False{}:
+      IO.die(Wr.Ov, 2, "btar: invalid --mode value")
+
+def ov_fin(o: Idr, g: Idr, mt: U32, mm: Op.Mm, numeric: Bool) -> IO(Wr.Ov):
+  match o:
+    case MkIdr{uid, un}:
+      match g:
+        case MkIdr{gid, gn}:
+          match mm:
+            case Op.MkMm{mand, mor, mx, ok}:
+              ov_fin2(ok, Wr.MkOv{uid, un, gid, gn, mand, mor, mx, mt, numeric})
+
+def build_ov(+items: List<&2, T.Item>) -> IO(Wr.Ov):
+  do IO<Wr.Ov>:
+    o : Idr <- ov_id(0, Cl.opt_last(items, Tb.o_owner()))
+    g : Idr <- ov_id(1, Cl.opt_last(items, Tb.o_group()))
+    mt : U32 <- mt_of(Cl.opt_last(items, Tb.o_mtime()))
+    ov_fin(o, g, mt, mm_of(Cl.opt_last(items, Tb.o_mode())),
+      Cl.has_opt(items, Tb.o_numeric_owner()))
+
+def launch(+items: List<&2, T.Item>, mask: U32) -> IO(Unit):
+  do IO<Unit>:
+    +sortf : Bool = beq(or_default(Cl.opt_last(items, Tb.o_sort()), bstr("none")),
+      bstr("name"))
+    +fl : List<&2, List<&2, U32>> <- pf_all(True{}, "--exclude-from", 4096n,
+      Cl.opt_args(items, Tb.o_exclude_from()), Nil{})
+    +tl : List<&2, List<&2, U32>> <- pf_all(False{}, "--files-from", 4096n,
+      Cl.opt_args(items, Tb.o_files_from()), Nil{})
+    +xf : List<&2, Xf.Xc> <- xf_all(256n,
+      Cl.opt_args2(items, Tb.o_transform(), Tb.o_xform()))
+    +ov : Wr.Ov <- build_ov(items)
+    +wo : Wr.Wo = Wr.MkWo{sortf, U.TNil{},
+      app_pl(Cl.opt_args(items, Tb.o_exclude()), fl),
+      Cl.has_opt(items, Tb.o_no_recursion()), xf, ov}
+    +ops : List<&2, List<&2, U32>> = rev_cat(Cl.operands(items), tl)
+    launch2(items, mask, wo, ops, xf)
+
+def gate_mode(ok: Bool, +mask: U32, +items: List<&2, T.Item>) -> IO(Unit):
+  match ok:
+    case True{}:
+      launch(items, mask)
+    case False{}:
+      die_usage(mode_msg(mask))
+
+# -O only makes sense when extracting; it is refused for the archive-writing modes.
+def o_conflict(+items: List<&2, T.Item>, mask: U32) -> Bool:
+  Bool.and(Cl.has_opt(items, Tb.o_to_stdout()),
+    Bool.not(U32.is_zero(U32.and(mask, 89))))
+
+def gate_refused(r: Maybe<&2, String>, +items: List<&2, T.Item>) -> IO(Unit):
+  match r:
+    case Some{msg}:
+      die_usage(msg)
+    case None{}:
+      gate_mode(Bool.and(valid_mask(op_mask(items)),
+        Bool.not(o_conflict(items, op_mask(items)))), op_mask(items), items)
+
+def gate_help(kind: U32, +items: List<&2, T.Item>) -> IO(Unit):
+  match kind:
+    case 1:
+      print_exit("btar 1.3.0")
+    case 2:
+      print_exit(usage())
+    case _:
+      gate_refused(first_refused(items), items)
+
+def info_kind(+items: List<&2, T.Item>) -> U32:
+  Bool.pick(U32, Cl.has_opt(items, Tb.o_version()), 1,
+    Bool.pick(U32, Bool.or(Cl.has_opt(items, Tb.o_help()),
+      Cl.has_opt(items, Tb.o_usage())), 2, 0))
+
+def gate_err(e: Maybe<&2, String>, +items: List<&2, T.Item>) -> IO(Unit):
+  match e:
+    case Some{msg}:
+      die_usage(msg)
+    case None{}:
+      gate_help(info_kind(items), items)
+
+def drop_prog(xs: List<&1, List<&2, U32>>) -> List<&1, List<&2, U32>>:
+  match xs:
+    case Nil{}:
+      Nil{}
+    case _ <> t:
+      t
+
+def run_items(+items: List<&2, T.Item>) -> IO(Unit):
+  gate_err(Cl.first_err(items), items)
+
+def run_main() -> IO(Unit):
+  do IO<Unit>:
+    a : List<&1, List<&2, U32>> <- IO.args_bytes()
+    run_items(Cl.parse(drop_prog(a)))
 
 def main() -> IO(Unit):
-  do IO<Unit>:
-    a0 : List<&1, List<&2, U32>> <- IO.args_bytes()
-    version_gate(has_version(256n, drop_prog(a0)))
+  run_main()

@@ -16,6 +16,7 @@
 # go through helpers taking a Bool.
 import Base
 import ./bytes.bend as B
+import ./num.bend as N
 import ./path.bend as Pth
 import ../effs/effects.bend as Fx
 
@@ -421,94 +422,161 @@ def walk_dirs(
 
 # ---- create one entry (regular file / symlink / hardlink) -----------------
 
+type Pm is Data:
+  MkPm{pol: U32, mt: U32}
+
 type Cre is Type:
   CrFile{opened: List<&1, File>, file: File}
   CrUnit{opened: List<&1, File>}
   CrErr{opened: List<&1, File>, code: U32, msg: String}
+  CrKeep{opened: List<&1, File>, loud: U32}
 
 # kind: 0 = O_CREAT|O_EXCL file, 1 = symlink(target), 2 = hardlink(target is a
-# component name in the same parent dir).
+# component name in the same parent dir).  pm = (overwrite policy, archive mtime):
+# policy 0 replaces an existing name, 1 keeps it and reports an error, 2 keeps it
+# silently, 3 keeps it when it is at least as new as the archive copy (an error).
+# `loud` of a kept entry: 0 silent, 1 "File exists", 2 "newer or same age".
 type Cs is Type:
   CsTry{
     opened: List<&1, File>,
     last: List<&2, U32>,
     mode: U32,
     kind: U32,
-    target: List<&2, U32>
+    target: List<&2, U32>,
+    +pm: Pm
   }
   CsUnlink{
     opened: List<&1, File>,
     last: List<&2, U32>,
     mode: U32,
     kind: U32,
-    target: List<&2, U32>
+    target: List<&2, U32>,
+    +pm: Pm
+  }
+  CsStat{
+    opened: List<&1, File>,
+    last: List<&2, U32>,
+    mode: U32,
+    kind: U32,
+    target: List<&2, U32>,
+    +pm: Pm
   }
   CsFinFile{opened: List<&1, File>, file: File}
   CsFinUnit{opened: List<&1, File>}
   CsFinErr{opened: List<&1, File>, code: U32, msg: String}
+  CsFinKeep{opened: List<&1, File>, loud: U32}
 
 def cs_next(
   opened: List<&1, File>, last: List<&2, U32>, mode: U32, kind: U32,
-  target: List<&2, U32>
+  target: List<&2, U32>, +pm: Pm
 ) -> Cs:
-  CsTry{opened, last, mode, kind, target}
+  CsTry{opened, last, mode, kind, target, pm}
 
 def cs_unlink(
   opened: List<&1, File>, last: List<&2, U32>, mode: U32, kind: U32,
-  target: List<&2, U32>
+  target: List<&2, U32>, +pm: Pm
 ) -> Cs:
-  CsUnlink{opened, last, mode, kind, target}
+  CsUnlink{opened, last, mode, kind, target, pm}
+
+def pm_pol(pm: Pm) -> U32:
+  match pm:
+    case MkPm{pol, _}:
+      pol
+
+def pm_mtime(pm: Pm) -> U32:
+  match pm:
+    case MkPm{_, mt}:
+      mt
+
+# The name exists: act on the overwrite policy.
+def exist_pol(
+  pol: U32, opened: List<&1, File>, last: List<&2, U32>, mode: U32, kind: U32,
+  target: List<&2, U32>, +pm: Pm
+) -> Cs:
+  match pol:
+    case 0:
+      cs_unlink(opened, last, mode, kind, target, pm)
+    case 1:
+      CsFinKeep{opened, 1}
+    case 2:
+      CsFinKeep{opened, 0}
+    case _:
+      CsStat{opened, last, mode, kind, target, pm}
 
 def create_eexist_case(
   c: Bool, opened: List<&1, File>, last: List<&2, U32>, mode: U32, kind: U32,
-  target: List<&2, U32>, code: U32, msg: String
+  target: List<&2, U32>, +pm: Pm, code: U32, msg: String
 ) -> Cs:
   match c:
     case True{}:
-      cs_unlink(opened, last, mode, kind, target)
+      exist_pol(pm_pol(pm), opened, last, mode, kind, target, pm)
     case False{}:
       CsFinErr{opened, code, msg}
 
 def create_eexist(
   opened: List<&1, File>, last: List<&2, U32>, mode: U32, kind: U32,
-  target: List<&2, U32>, +code: U32, msg: String
+  target: List<&2, U32>, +pm: Pm, +code: U32, msg: String
 ) -> Cs:
-  create_eexist_case(U32.is_eq(code, 17), opened, last, mode, kind, target,
+  create_eexist_case(U32.is_eq(code, 17), opened, last, mode, kind, target, pm,
     code, msg)
 
 def create_file_after(
   pr: File & Result<&1, &1, U32 & String, File>,
   tail: List<&1, File>, last: List<&2, U32>, mode: U32, kind: U32,
-  target: List<&2, U32>
+  target: List<&2, U32>, +pm: Pm
 ) -> Cs:
   (parent, r) = pr
   match r:
     case Done{file}:
       CsFinFile{parent <> tail, file}
     case Fail{(code, msg)}:
-      create_eexist(parent <> tail, last, mode, kind, target, code, msg)
+      create_eexist(parent <> tail, last, mode, kind, target, pm, code, msg)
 
 def create_unit_after(
   pr: File & Result<&1, &1, U32 & String, Unit>,
   tail: List<&1, File>, last: List<&2, U32>, mode: U32, kind: U32,
-  target: List<&2, U32>
+  target: List<&2, U32>, +pm: Pm
 ) -> Cs:
   (parent, r) = pr
   match r:
     case Done{u}:
       CsFinUnit{parent <> tail}
     case Fail{(code, msg)}:
-      create_eexist(parent <> tail, last, mode, kind, target, code, msg)
+      create_eexist(parent <> tail, last, mode, kind, target, pm, code, msg)
 
 def create_unlink_after(
   pr: File & Result<&1, &1, U32 & String, Unit>,
   tail: List<&1, File>, last: List<&2, U32>, mode: U32, kind: U32,
-  target: List<&2, U32>
+  target: List<&2, U32>, +pm: Pm
 ) -> Cs:
   (parent, r) = pr
   match r:
     case Done{u}:
-      cs_next(parent <> tail, last, mode, kind, target)
+      cs_next(parent <> tail, last, mode, kind, target, pm)
+    case Fail{(code, msg)}:
+      CsFinErr{parent <> tail, code, msg}
+
+# Keep-newer: the existing entry is kept when its mtime >= the archive's.
+def stat_decide(
+  newer: Bool, opened: List<&1, File>, last: List<&2, U32>, mode: U32,
+  kind: U32, target: List<&2, U32>, +pm: Pm
+) -> Cs:
+  match newer:
+    case True{}:
+      CsFinKeep{opened, 2}
+    case False{}:
+      cs_unlink(opened, last, mode, kind, target, pm)
+
+def stat_after(
+  pr: File & Result<&1, &1, U32 & String, List<&2, U32>>,
+  tail: List<&1, File>, last: List<&2, U32>, mode: U32, kind: U32,
+  target: List<&2, U32>, +pm: Pm
+) -> Cs:
+  (parent, r) = pr
+  match r:
+    case Done{st}:
+      stat_decide(U32.is_ge(N.nth(st, 6n), pm_mtime(pm)), parent <> tail, last,
+        mode, kind, target, pm)
     case Fail{(code, msg)}:
       CsFinErr{parent <> tail, code, msg}
 
@@ -524,7 +592,9 @@ def create(fuel: Nat, cs: Cs) -> IO(Cre):
           IO.pure(Cre, CrUnit{opened})
         case CsFinErr{opened, code, msg}:
           IO.pure(Cre, CrErr{opened, code, msg})
-        case CsTry{opened, +last, +mode, +kind, +target}:
+        case CsFinKeep{opened, loud}:
+          IO.pure(Cre, CrKeep{opened, loud})
+        case CsTry{opened, +last, +mode, +kind, +target, +pm}:
           match opened:
             case Nil{}:
               IO.die(Cre, 2, "btar: internal error: empty directory chain")
@@ -535,20 +605,29 @@ def create(fuel: Nat, cs: Cs) -> IO(Cre):
                     pr : File & Result<&1, &1, U32 & String, File> <-
                       Fx.Fs.openat_file(h, last, mode)
                     create(p, create_file_after(pr, t, last, mode, kind,
-                      target))
+                      target, pm))
                 case 1:
                   do IO<Cre>:
                     pr : File & Result<&1, &1, U32 & String, Unit> <-
                       Fx.Fs.symlinkat(h, last, target)
                     create(p, create_unit_after(pr, t, last, mode, kind,
-                      target))
+                      target, pm))
                 case _:
                   do IO<Cre>:
                     pr : File & Result<&1, &1, U32 & String, Unit> <-
                       Fx.Fs.linkat(h, target, last)
                     create(p, create_unit_after(pr, t, last, mode, kind,
-                      target))
-        case CsUnlink{opened, +last, mode, kind, target}:
+                      target, pm))
+        case CsStat{opened, +last, mode, kind, target, pm}:
+          match opened:
+            case Nil{}:
+              IO.die(Cre, 2, "btar: internal error: empty directory chain")
+            case h <> t:
+              do IO<Cre>:
+                pr : File & Result<&1, &1, U32 & String, List<&2, U32>> <-
+                  Fx.Fs.statx(h, last)
+                create(p, stat_after(pr, t, last, mode, kind, target, pm))
+        case CsUnlink{opened, +last, mode, kind, target, pm}:
           match opened:
             case Nil{}:
               IO.die(Cre, 2, "btar: internal error: empty directory chain")
@@ -557,24 +636,25 @@ def create(fuel: Nat, cs: Cs) -> IO(Cre):
                 pr : File & Result<&1, &1, U32 & String, Unit> <-
                   Fx.Fs.unlinkat(h, last)
                 create(p, create_unlink_after(pr, t, last, mode, kind,
-                  target))
+                  target, pm))
 
 def create_file_run(
-  fuel: Nat, opened: List<&1, File>, last: List<&2, U32>, mode: U32
+  fuel: Nat, opened: List<&1, File>, last: List<&2, U32>, mode: U32,
+  +pm: Pm
 ) -> IO(Cre):
-  create(fuel, cs_next(opened, last, mode, 0, Nil{}))
+  create(fuel, cs_next(opened, last, mode, 0, Nil{}, pm))
 
 def create_symlink_run(
   fuel: Nat, opened: List<&1, File>, last: List<&2, U32>,
-  target: List<&2, U32>
+  target: List<&2, U32>, +pm: Pm
 ) -> IO(Cre):
-  create(fuel, cs_next(opened, last, 511, 1, target))
+  create(fuel, cs_next(opened, last, 511, 1, target, pm))
 
 def create_hardlink_run(
   fuel: Nat, opened: List<&1, File>, last: List<&2, U32>,
-  target: List<&2, U32>
+  target: List<&2, U32>, +pm: Pm
 ) -> IO(Cre):
-  create(fuel, cs_next(opened, last, 0, 2, target))
+  create(fuel, cs_next(opened, last, 0, 2, target, pm))
 
 # ---- directory create + chmod + mtime -------------------------------------
 

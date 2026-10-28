@@ -43,7 +43,7 @@ check() {
   version
   for f in $(bend_files); do
     case "$f" in
-      */src/read_stream.bend|*/src/extract.bend|*/src/write.bend|*/src/gzio.bend|*/src/append.bend|*/app/main.bend) continue ;; # effects
+      */src/read_stream.bend|*/src/extract.bend|*/src/write.bend|*/src/gzio.bend|*/src/append.bend|*/src/rewrite.bend|*/app/main.bend) continue ;; # effects
     esac
     echo "check $f"
     "$BEND" --check-only "$f" >/dev/null
@@ -156,6 +156,11 @@ append_test() {
   if [ -f "$ROOT/tools/test_append.sh" ]; then
     BTAR="$BTAR_BIN" "$ROOT/tools/test_append.sh"
     BTAR="$BTAR_BIN" "$ROOT/tools/test_exclude.sh"
+    BTAR="$BTAR_BIN" "$ROOT/tools/test_members.sh"
+    BTAR="$BTAR_BIN" "$ROOT/tools/test_rewrite.sh"
+    BTAR="$BTAR_BIN" "$ROOT/tools/test_transform.sh"
+    BTAR="$BTAR_BIN" "$ROOT/tools/test_stdio.sh"
+    BTAR="$BTAR_BIN" "$ROOT/tools/test_options.sh"
     python3 "$ROOT/tools/fuzz_append.py" --bin "$BTAR_BIN" --iterations 300
   else
     echo "append: SKIP (tools/test_append.sh missing)"

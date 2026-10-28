@@ -858,3 +858,8 @@ def encode_list_go(
 
 def encode_list(+h: Header) -> List<&2, U32>:
   encode_list_go(encode(h))
+
+def set_names(h: Header, un: List<&2, U32>, gn: List<&2, U32>) -> Header:
+  match h:
+    case MkHeader{name, mode, uid, gid, size, mtime, typeflag, linkname, format, _, _, devmajor, devminor, prefix}:
+      MkHeader{name, mode, uid, gid, size, mtime, typeflag, linkname, format, un, gn, devmajor, devminor, prefix}

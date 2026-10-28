@@ -16,6 +16,8 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <grp.h>
+#include <pwd.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
@@ -454,9 +456,11 @@ Term fs_fchmodat_run(Env e, Term* f, IoWork* w) {
 // Fs.utimensat(dir, name, mtime) -> dir & Result<..., Unit>. Sets atime and
 // mtime to mtime (GNU tar's default: no atime preservation in v1).
 static void fs_utimensat_call(IoWork* w) {
+  // 0xFFFFFFFF leaves the times alone (btar -m / --touch).
+  long ns = (uint32_t)w->word == UINT32_MAX ? UTIME_OMIT : 0;
   struct timespec ts[2] = {
-    { (time_t)w->word, 0 },
-    { (time_t)w->word, 0 },
+    { (time_t)w->word, ns },
+    { (time_t)w->word, ns },
   };
   io_sys_end(w, utimensat((int)w->hand, w->data, ts, AT_SYMLINK_NOFOLLOW));
 }
@@ -742,10 +746,142 @@ Term data_copy_stdout_run(Env e, Term* f, IoWork* w) {
     fs_fd_reg((int)w->hand));
 }
 
+// Data.copy_eof(in, out) -> in & out & Result<..., Unit>. Copies until the source
+// reports EOF (stdin pipes of unknown length); the pump that feeds a re-readable
+// pipe for non-seekable archives.
+static void data_copy_eof_call(IoWork* w) {
+  char* buf = w->data;
+  w->code = 0;
+  for (;;) {
+    ssize_t n = read((int)w->hand, buf, BTAR_COPY_CHUNK);
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      w->code = (u32)errno;
+      return;
+    }
+    if (n == 0) {
+      return;
+    }
+    ssize_t at = 0;
+    while (at < n) {
+      ssize_t m = write((int)w->made, buf + at, (u64)(n - at));
+      if (m < 0) {
+        if (errno == EINTR) {
+          continue;
+        }
+        w->code = (u32)errno;
+        return;
+      }
+      if (m == 0) {
+        w->code = EIO;
+        return;
+      }
+      at += m;
+    }
+  }
+}
+
+Term data_copy_eof_run(Env e, Term* f, IoWork* w) {
+  w->hand = (intptr_t)io_hand_v(f[0]);
+  w->made = (intptr_t)io_hand_v(f[1]);
+  w->data = io_mem(malloc(BTAR_COPY_CHUNK));
+  return io_work(w, data_copy_eof_call, data_copy_pack);
+}
+
 // Fs.euid() -> U32. The effective uid decides whether -p may keep setuid/setgid.
 Term fs_euid_run(Env e, Term* f, IoWork* w) {
   (void)e; (void)f; (void)w;
   return (Term)(uint32_t)geteuid();
+}
+
+// Fs.tzoff(t) -> U32. Local UTC offset in seconds at time t, biased by 2^31 so it
+// stays unsigned (listing timestamps are printed in local time, like GNU).
+Term fs_tzoff_run(Env e, Term* f, IoWork* w) {
+  (void)e; (void)w;
+  time_t t = (time_t)(uint32_t)f[0];
+  struct tm tm;
+  long off = 0;
+  if (localtime_r(&t, &tm) != NULL) {
+    off = tm.tm_gmtoff;
+  }
+  return (Term)(uint32_t)((int64_t)off + 2147483648LL);
+}
+
+// Fs.id_name(kind, id) -> Result<..., Bytes>: user (kind 0) or group (kind 1) name.
+static void fs_id_name_call(IoWork* w) {
+  char buf[16384];
+  const char* name = NULL;
+  if (w->made == 0) {
+    struct passwd pw, *res = NULL;
+    if (getpwuid_r((uid_t)w->word, &pw, buf, sizeof buf, &res) == 0 && res) {
+      name = res->pw_name;
+    }
+  } else {
+    struct group gr, *res = NULL;
+    if (getgrgid_r((gid_t)w->word, &gr, buf, sizeof buf, &res) == 0 && res) {
+      name = res->gr_name;
+    }
+  }
+  if (name == NULL) {
+    w->code = ENOENT;
+    w->data = NULL;
+    w->size = 0;
+    return;
+  }
+  w->size = strlen(name);
+  w->data = io_mem(malloc(w->size + 1));
+  memcpy(w->data, name, w->size);
+  w->code = 0;
+}
+
+static Term fs_id_name_pack(Env e, IoWork* w) {
+  Term v = io_list(e, w->data, w->size);
+  fs_clear(w);
+  return io_res(e, w, v);
+}
+
+Term fs_id_name_run(Env e, Term* f, IoWork* w) {
+  w->made = (intptr_t)(uint32_t)f[0];
+  w->word = (uint32_t)f[1];
+  return fs_inline(e, w, fs_id_name_call, fs_id_name_pack);
+}
+
+// Fs.name_id(kind, name) -> Result<..., U32>: user/group id of a name.
+static void fs_name_id_call(IoWork* w) {
+  char buf[16384];
+  w->code = ENOENT;
+  if (w->made == 0) {
+    struct passwd pw, *res = NULL;
+    if (getpwnam_r((const char*)w->text, &pw, buf, sizeof buf, &res) == 0 && res) {
+      w->word = res->pw_uid;
+      w->code = 0;
+    }
+  } else {
+    struct group gr, *res = NULL;
+    if (getgrnam_r((const char*)w->text, &gr, buf, sizeof buf, &res) == 0 && res) {
+      w->word = gr.gr_gid;
+      w->code = 0;
+    }
+  }
+}
+
+static Term fs_name_id_pack(Env e, IoWork* w) {
+  u32 v = (u32)w->word;
+  fs_clear(w);
+  return io_res(e, w, (Term)(uint32_t)v);
+}
+
+Term fs_name_id_run(Env e, Term* f, IoWork* w) {
+  u64 len = 0;
+  w->made = (intptr_t)(uint32_t)f[0];
+  w->text = io_cbuf(e, f[1], &len, CID(Con));
+  if (w->text == NULL || len == 0) {
+    w->code = EINVAL;
+    return fs_name_id_pack(e, w);
+  }
+  return fs_inline(e, w, fs_name_id_call, fs_name_id_pack);
 }
 
 // Fs.statx(dir, name) -> dir & Result<..., List<U32>>; lstat fields in fixed
@@ -973,6 +1109,10 @@ static Term stream_seek_pack(Env e, IoWork* w) {
 }
 
 Term stream_seek_run(Env e, Term* f, IoWork* w) {
+  // The work item is recycled: a File.open_bytes pack frees w->data without
+  // clearing it, and stream_seek_pack's fs_clear would free it again.
+  w->data = NULL;
+  w->text = NULL;
   w->hand = (intptr_t)io_hand_v(f[0]);
   w->word = (uint32_t)f[1];
   w->size = (uint32_t)f[2];
@@ -997,6 +1137,8 @@ static void fs_trunc_cur_call(IoWork* w) {
 }
 
 Term fs_trunc_cur_run(Env e, Term* f, IoWork* w) {
+  w->data = NULL; // see stream_seek_run
+  w->text = NULL;
   w->hand = (intptr_t)io_hand_v(f[0]);
   return fs_inline(e, w, fs_trunc_cur_call, fs_unit_pack);
 }
@@ -1336,11 +1478,23 @@ static void __attribute__((constructor)) btar_fs_use(void) {
 #ifdef CID(Fs.readlink_path)
   io_eff(CID(Fs.readlink_path), fs_readlink_path_run);
 #endif
+#ifdef CID(Fs.tzoff)
+  io_eff(CID(Fs.tzoff), fs_tzoff_run);
+#endif
+#ifdef CID(Fs.id_name)
+  io_eff(CID(Fs.id_name), fs_id_name_run);
+#endif
+#ifdef CID(Fs.name_id)
+  io_eff(CID(Fs.name_id), fs_name_id_run);
+#endif
 #ifdef CID(Fs.euid)
   io_eff(CID(Fs.euid), fs_euid_run);
 #endif
 #ifdef CID(Data.copy_stdout)
   io_eff(CID(Data.copy_stdout), data_copy_stdout_run);
+#endif
+#ifdef CID(Data.copy_eof)
+  io_eff(CID(Data.copy_eof), data_copy_eof_run);
 #endif
 #ifdef CID(Data.copy)
   io_eff(CID(Data.copy), data_copy_run);

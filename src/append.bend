@@ -46,11 +46,12 @@ type Ss is Type:
 def die_at(msg: String, +off: U32) -> Ss:
   SDie{"btar: " ++ msg ++ " at offset " ++ U32.show(off)}
 
-def tab_add(+upd: Bool, +h: H.Header, +pend: E.Pend, +glob: P.Pax,
+def tab_add(+upd: Bool, +next: U32, +h: H.Header, +pend: E.Pend, +glob: P.Pax,
   +tab: U.Tab) -> U.Tab:
   match upd:
     case True{}:
-      U.tab_add(tab, U.am_new(E.resolve_name(h, pend), R.eff_mtime(h, pend, glob)))
+      U.tab_add(tab, U.am_span(E.resolve_name(h, pend),
+        R.eff_mtime(h, pend, glob), next))
     case False{}:
       tab
 
@@ -77,7 +78,7 @@ def data_next(
     case Some{n}:
       +next = U32.add(U32.add(off, 512), U32.mul(n, 512))
       data_fits(Bool.and(U32.is_gt(next, off), U32.is_le(next, flen)), fd,
-        next, flen, glob, tab_add(upd, h, pend, glob, tab), upd, off)
+        next, flen, glob, tab_add(upd, next, h, pend, glob, tab), upd, off)
 
 def data_entry(
   fd: File, +off: U32, +flen: U32, +h: H.Header, +pend: E.Pend, +glob: P.Pax,

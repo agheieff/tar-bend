@@ -110,6 +110,9 @@ and a matching directory excludes its contents. Works with create, append, updat
 .BI \-\-exclude\-from= FILE ", " \-X " FILE"
 Read patterns from FILE, one per line (trailing whitespace stripped, empty lines ignored).
 .TP
+.BI \-T " FILE" ", " \-\-files\-from= FILE
+Read member/file names from FILE, one per line, verbatim; they follow the command-line operands.
+.TP
 .B \-\-no\-recursion
 Create/append/update: archive a directory operand as a directory entry only.
 .TP
@@ -118,6 +121,8 @@ Create: sort each directory's entries by raw name bytes (deterministic output).
 .TP
 .BR \-\-version ", " \-V
 Print the version.
+.PP
+In list and extract mode, operands after the archive select members (and everything below them).
 .SH EXIT STATUS
 .TP
 .B 0

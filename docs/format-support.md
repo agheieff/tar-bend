@@ -1,4 +1,4 @@
-# Format support (btar 1.2.0)
+# Format support (btar 1.3.0)
 
 ## Read
 
@@ -48,7 +48,12 @@
 | `--exclude-from=F`, `--exclude-from F`, `-X F` | yes | one pattern per line, trailing whitespace stripped, empty lines ignored |
 | `--no-recursion` | yes | create/append/update |
 | glob classes `[[:alpha:]]`, `[=x=]`, `[.x.]` | no | literal bracket handling only |
-| `--exclude-vcs/-caches/-tag`, `--anchored`, `--wildcards`, `--ignore-case`, `-T`, `--transform`, `--delete`, `-A`, `-d` | no | |
+| member operands `-t/-x ARCHIVE NAME...` | yes | literal, anchored; selects the member and everything below it; trailing `/` ignored; unmatched operands print `Not found in archive` and exit 2 (same text as GNU) |
+| `-T FILE`, `--files-from=FILE`, `--files-from FILE` | yes | create/append/update/list/extract; one name per line, names verbatim (no trimming), blank lines skipped; appended after command-line operands; not accepted in a bundle (`-cTf`); no `-T -`, `--null`, `-` option lines |
+| `--delete -f ARCH NAME...` | yes | uncompressed archives, in place ([rewrite.md](rewrite.md)) |
+| `-A` / `--concatenate -f DEST SRC...` | yes | uncompressed archives, in place ([rewrite.md](rewrite.md)) |
+| `--transform=EXPR`, `--xform=EXPR` (also as separate argument; repeatable) | yes | create/append/update and extract; `s/RE/REPL/[gi]` ([transform.md](transform.md)) |
+| `--exclude-vcs/-caches/-tag`, `--anchored`, `--wildcards`, `--ignore-case`, `-d` | no | |
 
 ## pax keys consumed
 

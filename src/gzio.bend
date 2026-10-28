@@ -200,6 +200,55 @@ def inflate_open(a: File) -> IO(File & Dr):
     pp : File & File <- IO.try(File & File, Fx.Fs.pipe())
     pipe_done(pp, a)
 
+# ---- non-seekable input (e.g. `btar -xf -`) --------------------------------------
+# The two magic bytes were already consumed, so a forked feeder rebuilds the
+# stream in a pipe: `magic`, then the rest of `a` up to EOF.  The read end is
+# then consumed like a regular archive (or handed to the inflater).
+
+def feed_close(pr: File & (File & Result<&1, &1, U32 & String, Unit>)) ->
+  IO(Unit):
+  (a, rest) = pr
+  (w, r) = rest
+  do IO<Unit>:
+    u1 : Unit <- File.close(a)
+    u2 : Unit <- File.close(w)
+    IO.pure(Unit, Unit{})
+
+def feed_copy(w: File, a: File) -> IO(Unit):
+  do IO<Unit>:
+    pr : File & (File & Result<&1, &1, U32 & String, Unit>) <-
+      Fx.Data.copy_eof(a, w)
+    feed_close(pr)
+
+def feed_wrote(a: File, pr: File & Result<&1, &1, U32 & String, Unit>) ->
+  IO(Unit):
+  (w, r) = pr
+  match r:
+    case Done{u}:
+      feed_copy(w, a)
+    case Fail{(code, msg)}:
+      do IO<Unit>:
+        u1 : Unit <- File.close(a)
+        u2 : Unit <- File.close(w)
+        IO.pure(Unit, Unit{})
+
+def feed_run(a: File, w: File, magic: List<&2, U32>) -> IO(Unit):
+  do IO<Unit>:
+    pr : File & Result<&1, &1, U32 & String, Unit> <-
+      Fx.Stream.write_bytes(w, magic)
+    feed_wrote(a, pr)
+
+def feed_forked(pp: File & File, a: File, magic: List<&2, U32>) -> IO(File):
+  (r, w) = pp
+  do IO<File>:
+    ch : Chan(Unit) <- IO.fork(Unit, feed_run(a, w, magic))
+    IO.pure(File, r)
+
+def feed_open(a: File, magic: List<&2, U32>) -> IO(File):
+  do IO<File>:
+    pp : File & File <- IO.try(File & File, Fx.Fs.pipe())
+    feed_forked(pp, a, magic)
+
 # ---- compression pump ----------------------------------------------------------------
 # `r` (a pipe fed by the tar writer) -> Gzcomp -> `out`.  Each round reads up to
 # `lanes` segments of 128 KiB (each delivered with its 32 KiB tail by

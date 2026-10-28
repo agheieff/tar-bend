@@ -82,6 +82,20 @@ def Fs.linkat_at(from_dir: File, from_name: List<&2, U32>, to_dir: File,
   import "./fs.c"
   import "./fs.js"
 
+def Fs.tzoff(t: U32) -> IO(U32):
+  import "./fs.c"
+  import "./fs.js"
+
+def Fs.id_name(kind: U32, id: U32) ->
+  IO(Result<&1, &1, U32 & String, List<&2, U32>>):
+  import "./fs.c"
+  import "./fs.js"
+
+def Fs.name_id(kind: U32, name: List<&2, U32>) ->
+  IO(Result<&1, &1, U32 & String, U32>):
+  import "./fs.c"
+  import "./fs.js"
+
 def Fs.euid() -> IO(U32):
   import "./fs.c"
   import "./fs.js"
@@ -142,6 +156,11 @@ def Fs.openat_read(dir: File, name: List<&2, U32>) ->
   import "./fs.js"
 
 def Data.copy(in: File, out: File, size: U32) ->
+  IO(File & (File & Result<&1, &1, U32 & String, Unit>)):
+  import "./fs.c"
+  import "./fs.js"
+
+def Data.copy_eof(in: File, out: File) ->
   IO(File & (File & Result<&1, &1, U32 & String, Unit>)):
   import "./fs.c"
   import "./fs.js"

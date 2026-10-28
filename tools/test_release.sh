@@ -181,7 +181,7 @@ begin "check / app compile"
 checked=0
 for f in "$ROOT"/src/*.bend; do
     case "$f" in
-        */read_stream.bend|*/extract.bend|*/write.bend|*/gzio.bend|*/append.bend) continue ;; # effects
+        */read_stream.bend|*/extract.bend|*/write.bend|*/gzio.bend|*/append.bend|*/rewrite.bend|*/cli*.bend|*/ovparse.bend) continue ;; # effects
     esac
     "$BEND" --check-only "$f" >>"$CURRENT_LOG" 2>&1 \
         || fail_fast "check-only failed: $f"
@@ -252,6 +252,21 @@ begin "append/exclude harness"
 run_logged env BTAR="$BTAR" "$ROOT/tools/test_exclude.sh" || fail_fast "exclude harness failed"
 exclude_line="$(grep -E 'test_exclude: [0-9]+ passed, 0 failed' "$CURRENT_LOG" | tail -n 1 || true)"
 [ -n "$exclude_line" ] || fail_fast "exclude harness: summary missing"
+run_logged env BTAR="$BTAR" "$ROOT/tools/test_members.sh" || fail_fast "members harness failed"
+members_line="$(grep -E 'test_members: [0-9]+ passed, 0 failed' "$CURRENT_LOG" | tail -n 1 || true)"
+[ -n "$members_line" ] || fail_fast "members harness: summary missing"
+run_logged env BTAR="$BTAR" "$ROOT/tools/test_rewrite.sh" || fail_fast "rewrite harness failed"
+rewrite_line="$(grep -E 'test_rewrite: [0-9]+ passed, 0 failed' "$CURRENT_LOG" | tail -n 1 || true)"
+[ -n "$rewrite_line" ] || fail_fast "rewrite harness: summary missing"
+run_logged env BTAR="$BTAR" "$ROOT/tools/test_transform.sh" || fail_fast "transform harness failed"
+transform_line="$(grep -E 'test_transform: [0-9]+ passed, 0 failed' "$CURRENT_LOG" | tail -n 1 || true)"
+[ -n "$transform_line" ] || fail_fast "transform harness: summary missing"
+run_logged env BTAR="$BTAR" "$ROOT/tools/test_stdio.sh" || fail_fast "stdio harness failed"
+stdio_line="$(grep -E 'test_stdio: [0-9]+ passed, 0 failed' "$CURRENT_LOG" | tail -n 1 || true)"
+[ -n "$stdio_line" ] || fail_fast "stdio harness: summary missing"
+run_logged env BTAR="$BTAR" "$ROOT/tools/test_options.sh" || fail_fast "options harness failed"
+options_line="$(grep -E 'test_options: [0-9]+ passed, 0 failed' "$CURRENT_LOG" | tail -n 1 || true)"
+[ -n "$options_line" ] || fail_fast "options harness: summary missing"
 run_logged env BTAR="$BTAR" "$ROOT/tools/test_append.sh" || fail_fast "append harness failed"
 append_line="$(grep -E 'test_append: [0-9]+ passed, 0 failed' "$CURRENT_LOG" | tail -n 1 || true)"
 [ -n "$append_line" ] || fail_fast "append harness: summary missing"
@@ -259,7 +274,7 @@ run_logged python3 "$ROOT/tools/fuzz_append.py" --bin "$BTAR" --iterations 300 \
     || fail_fast "append fuzz failed"
 afuzz_line="$(grep -E 'fuzz_append: runs=[0-9]+ clean=[0-9]+' "$CURRENT_LOG" | tail -n 1 || true)"
 [ -n "$afuzz_line" ] || fail_fast "append fuzz: summary missing"
-pass "$append_line; $afuzz_line; $exclude_line"
+pass "$append_line; $afuzz_line; $exclude_line; $members_line; $rewrite_line; $transform_line; $stdio_line; $options_line"
 
 # --------------------------------------------------------------------------- #
 # 12. M6 aggregate (full runs only; it repeats create/gzip/security/diff)

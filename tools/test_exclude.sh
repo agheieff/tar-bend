@@ -158,7 +158,7 @@ for c in "${extract_cases[@]}"; do
     if python3 "$COMPARE" xg xb >cmp.out 2>&1; then ok; else bad "extract '$c' tree differs"; head -5 cmp.out | sed 's/^/      /'; fi
 done
 # listing with -v
-g="$(tar --quoting-style=literal -tf full.tar --exclude=foo)"
+g="$(tar -tvf full.tar --exclude=foo)"
 b="$("$BTAR" -tvf full.tar --exclude=foo 2>&1)"
 [ "$g" = "$b" ] && ok || bad "verbose list with exclude"
 

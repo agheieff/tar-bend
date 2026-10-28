@@ -11,7 +11,7 @@ import Base
 import ./bytes.bend as B
 
 type Am is Data:
-  MkAm{h: U32, mt: U32, name: List<&2, U32>}
+  MkAm{h: U32, mt: U32, name: List<&2, U32>, raw: List<&2, U32>, end: U32}
 
 # Remove every leading "./".
 def strip_lead(fuel: Nat, xs: List<&2, U32>) -> List<&2, U32>:
@@ -73,19 +73,22 @@ def hash(+xs: List<&2, U32>) -> U32:
   hash_go(Nat.add(List.length(&2, U32, xs), 1n), xs, 5381)
 
 # Table entry for an archive member (name already resolved: pax/longname).
-def am_new(name: List<&2, U32>, mt: U32) -> Am:
+def am_span(+name: List<&2, U32>, mt: U32, end: U32) -> Am:
   +n = norm(name)
-  MkAm{hash(n), mt, n}
+  MkAm{hash(n), mt, n, name, end}
+
+def am_new(name: List<&2, U32>, mt: U32) -> Am:
+  am_span(name, mt, 0)
 
 def am_match(a: Am, +h: U32, +nm: List<&2, U32>, +mt: U32) -> Bool:
   match a:
-    case MkAm{ah, amt, an}:
+    case MkAm{ah, amt, an, _, _}:
       Bool.and(U32.is_eq(ah, h),
         Bool.and(U32.is_ge(amt, mt), B.eq_list(an, nm, True{})))
 
 def am_h(a: Am) -> U32:
   match a:
-    case MkAm{ah, amt, an}:
+    case MkAm{ah, amt, an, _, _}:
       ah
 
 # `found` is threaded through so the scan stops at the first hit without a
@@ -162,3 +165,92 @@ def skip(+t: Tab, name: List<&2, U32>, mt: U32) -> Bool:
       False{}
     case TNode{_, _, _, _}:
       skip_norm(t, norm(name), mt)
+
+# ---- ordered member spans (--delete) ---------------------------------------
+#
+# The scan stores each member's raw stored name and the offset just past its
+# data; sorted by that offset the table gives the member spans in archive
+# order (member i covers [end(i-1), end(i)); metadata headers belong to the
+# member that follows them).
+
+def am_cat(xs: List<&2, Am>, ys: List<&2, Am>) -> List<&2, Am>:
+  match xs:
+    case Nil{}:
+      ys
+    case h <> t:
+      h <> am_cat(t, ys)
+
+def tab_flat(+fuel: Nat, t: Tab, acc: List<&2, Am>) -> List<&2, Am>:
+  match fuel:
+    case 0n:
+      acc
+    case 1n+p:
+      match t:
+        case TNil{}:
+          acc
+        case TNode{_, es, l, r}:
+          tab_flat(p, l, am_cat(es, tab_flat(p, r, acc)))
+
+def am_raw(a: Am) -> List<&2, U32>:
+  match a:
+    case MkAm{_, _, _, r, _}:
+      r
+
+def am_end(a: Am) -> U32:
+  match a:
+    case MkAm{_, _, _, _, e}:
+      e
+
+def am_merge(fuel: Nat, xs: List<&2, Am>, ys: List<&2, Am>) -> List<&2, Am>:
+  match fuel:
+    case 0n:
+      am_cat(xs, ys)
+    case 1n+p:
+      match xs:
+        case Nil{}:
+          ys
+        case +x <> +xt:
+          match ys:
+            case Nil{}:
+              x <> xt
+            case +y <> +yt:
+              +xf = U32.is_le(am_end(x), am_end(y))
+              Bool.pick(Am, xf, x, y) <> am_merge(p,
+                Bool.pick(List<&2, Am>, xf, xt, x <> xt),
+                Bool.pick(List<&2, Am>, xf, y <> yt, yt))
+
+# Every other element, starting with the first / second.
+def am_keep(first: Bool, x: Am, rest: List<&2, Am>) -> List<&2, Am>:
+  match first:
+    case True{}:
+      x <> rest
+    case False{}:
+      rest
+
+def am_alt(xs: List<&2, Am>, +first: Bool) -> List<&2, Am>:
+  match xs:
+    case Nil{}:
+      Nil{}
+    case x <> t:
+      am_keep(first, x, am_alt(t, Bool.not(first)))
+
+def am_sort(+fuel: Nat, +xs: List<&2, Am>) -> List<&2, Am>:
+  match fuel:
+    case 0n:
+      xs
+    case 1n+p:
+      match xs:
+        case Nil{}:
+          Nil{}
+        case x <> rest:
+          match rest:
+            case Nil{}:
+              x <> Nil{}
+            case _ <> _:
+              am_merge(Nat.add(am_len(xs), 1n),
+                am_sort(p, am_alt(xs, True{})), am_sort(p, am_alt(xs, False{})))
+
+# Archive members in order of position.
+def tab_spans(+t: Tab) -> List<&2, Am>:
+  +all = tab_flat(1048576n, t, Nil{})
+  am_sort(Nat.add(am_len(all), 1n), all)

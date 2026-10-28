@@ -18,6 +18,9 @@ import ./path.bend as Pth
 import ./limits.bend as Lim
 import ./extract.bend as X
 import ./glob.bend as Glob
+import ./xform.bend as Xf
+import ./upd.bend as Up
+import ./listfmt.bend as LF
 import ../effs/effects.bend as Fx
 
 type Cfg is Data:
@@ -28,8 +31,13 @@ type Cfg is Data:
     preserve: Bool,
     to_stdout: Bool,
     euid: U32,
-    warned: Bool,
-    exc: List<&2, List<&2, U32>>
+    st: U32,
+    exc: List<&2, List<&2, U32>>,
+    mem: List<&2, List<&2, U32>>,
+    left: List<&2, List<&2, U32>>,
+    xf: List<&2, Xf.Xc>,
+    ctl: U32,
+    lw: U32
   }
 
 # ---- next action after a printed name --------------------------------------
@@ -58,6 +66,7 @@ type Ev is Type:
   EvPad{next: U32, pad: U32, +pend: E.Pend}
   EvApply{off: U32, +h: H.Header, +tag: H.Tag, +pend: E.Pend}
   EvPrint{name: List<&2, U32>, nxt: Next}
+  EvList{h: H.Header, pend: E.Pend, glob: P.Pax, size: U32, nxt: Next}
   EvSkipData{off: U32, next: U32, size: U32}
   EvWalk{
     anc: List<&1, List<&2, U32>>,
@@ -81,6 +90,7 @@ type Ev is Type:
   EvOpen{
     opened: List<&1, File>,
     last: List<&2, U32>,
+    np: List<&2, U32>,
     mode: U32,
     mtime: U32,
     size: U32,
@@ -120,9 +130,18 @@ type Ev is Type:
     mtime: U32,
     next: U32
   }
+  EvKeep{
+    opened: List<&1, File>,
+    np: List<&2, U32>,
+    aux: List<&2, U32>,
+    loud: U32,
+    skip: U32,
+    next: U32
+  }
   EvSymlink{
     opened: List<&1, File>,
     last: List<&2, U32>,
+    np: List<&2, U32>,
     +target: List<&2, U32>,
     +mtime: U32,
     next: U32
@@ -237,8 +256,9 @@ def mode_mask() -> U32:
 
 def warn_cfg(+cfg: Cfg) -> Cfg:
   match cfg:
-    case MkCfg{extract, strip, verbose, preserve, to_stdout, euid, _, exc}:
-      MkCfg{extract, strip, verbose, preserve, to_stdout, euid, True{}, exc}
+    case MkCfg{extract, strip, verbose, preserve, to_stdout, euid, +st, exc, mem, left, xf, ctl, lw}:
+      MkCfg{extract, strip, verbose, preserve, to_stdout, euid, U32.or(st, 1), exc, mem,
+        left, xf, ctl, lw}
 
 def mode_root(is_root: Bool, +mode0: U32) -> U32:
   match is_root:
@@ -256,7 +276,7 @@ def mode_preserve(preserve: Bool, euid: U32, +mode0: U32) -> U32:
 
 def mode_policy(+cfg: Cfg, +mode0: U32) -> U32:
   match cfg:
-    case MkCfg{_, _, _, preserve, _, euid, _, _}:
+    case MkCfg{_, _, _, preserve, _, euid, _, _, _, _, _, _, _}:
       mode_preserve(preserve, euid, mode0)
 
 def gl_dig(dig: Bool, h: U32, t: List<&2, U32>, acc: U32) -> Gl:
@@ -484,6 +504,44 @@ def pad_after(
 
 # ---- EvApply: pure dispatch ----------------------------------------------
 
+def cfg_verbose(+cfg: Cfg) -> Bool:
+  match cfg:
+    case MkCfg{_, _, verbose, _, _, _, _, _, _, _, _, _, _}:
+      verbose
+
+def cfg_lw(+cfg: Cfg) -> U32:
+  match cfg:
+    case MkCfg{_, _, _, _, _, _, _, _, _, _, _, _, +lw}:
+      lw
+
+def cfg_set_lw(+cfg: Cfg, +w: U32) -> Cfg:
+  match cfg:
+    case MkCfg{extract, strip, verbose, preserve, to_stdout, euid, st, exc, mem, left, xf, ctl, _}:
+      MkCfg{extract, strip, verbose, preserve, to_stdout, euid, st, exc, mem,
+        left, xf, ctl, w}
+
+def link_of(m: Maybe<&2, List<&2, U32>>) -> List<&2, U32>:
+  match m:
+    case None{}:
+      Nil{}
+    case Some{v}:
+      v
+
+# -t: names only (quoted like GNU), or with -v the long listing line.
+def list_event(
+  verbose: Bool, h: H.Header, name: List<&2, U32>, pend: E.Pend, size: U32,
+  nxt: Next,
+  archive: File, sink: File, root: List<&2, U32>, cfg: Cfg, lim: Lim.State,
+  seen: List<&1, List<&2, U32>>, +glob: P.Pax
+) -> D:
+  match verbose:
+    case True{}:
+      MkD{archive, sink, root, cfg, lim, seen, glob,
+        EvList{h, pend, glob, size, nxt}}
+    case False{}:
+      MkD{archive, sink, root, cfg, lim, seen, glob,
+        EvPrint{LF.quote(name), nxt}}
+
 def apply_list(
   fuel: Nat, archive: File, sink: File, root: List<&2, U32>, +cfg: Cfg,
   +lim: Lim.State, seen: List<&1, List<&2, U32>>, +glob: P.Pax,
@@ -491,8 +549,8 @@ def apply_list(
 ) -> D:
   +name = E.resolve_name(h, pend)
   +skip = U32.add(size, pad_of(size))
-  MkD{archive, sink, root, cfg, lim, seen, glob,
-    EvPrint{name, NSkip{off, next, skip}}}
+  list_event(cfg_verbose(cfg), h, name, pend, size, NSkip{off, next, skip},
+    archive, sink, root, cfg, lim, seen, glob)
 
 def walk_plan(
   fuel: Nat, archive: File, sink: File, root: List<&2, U32>, +cfg: Cfg,
@@ -562,7 +620,7 @@ def walk_kind3(
   match kind:
     case 3:
       MkD{archive, sink, root, cfg, lim, seen, glob,
-        EvSymlink{opened, last, target, mtime, next}}
+        EvSymlink{opened, last, newpath, target, mtime, next}}
     case _:
       MkD{archive, sink, root, cfg, lim, seen, glob,
         EvHWalkT{opened, last, tanc, target, next, newpath}}
@@ -580,13 +638,92 @@ def dir_after(
       MkD{archive, sink, root, cfg, lim, seen, glob,
         EvFail{opened, code, "btar: " ++ msg}}
 
+# Policy skips (-k, --skip-old-files, --keep-newer-files): GNU reports an existing
+# file under -k as an error, continues, and exits 2 at the end.
+def keep_path(np: List<&2, U32>) -> String:
+  B.list_show(np)
+
+def keep_d(
+  opened: List<&1, File>, np: List<&2, U32>, aux: List<&2, U32>, loud: U32,
+  skip: U32, next: U32,
+  archive: File, sink: File, root: List<&2, U32>, cfg: Cfg, lim: Lim.State,
+  seen: List<&1, List<&2, U32>>, glob: P.Pax
+) -> D:
+  MkD{archive, sink, root, cfg, lim, seen, glob,
+    EvKeep{opened, np, aux, loud, skip, next}}
+
+def cfg_mt(+cfg: Cfg, +mtime: U32) -> U32:
+  match cfg:
+    case MkCfg{_, _, _, _, _, _, _, _, _, _, _, +ctl, _}:
+      Bool.pick(U32, U32.is_zero(U32.and(ctl, 16)), mtime, 4294967295)
+
+def cfg_pm(+cfg: Cfg, +mtime: U32) -> X.Pm:
+  match cfg:
+    case MkCfg{_, _, _, _, _, _, _, _, _, _, _, +ctl, _}:
+      X.MkPm{U32.and(ctl, 3), mtime}
+
+def fail_cfg(+cfg: Cfg) -> Cfg:
+  match cfg:
+    case MkCfg{extract, strip, verbose, preserve, to_stdout, euid, +st, exc, mem, left, xf, ctl, lw}:
+      MkCfg{extract, strip, verbose, preserve, to_stdout, euid, U32.or(st, 2), exc, mem,
+        left, xf, ctl, lw}
+
+def cfg_flag(+cfg: Cfg, +bit: U32) -> Bool:
+  match cfg:
+    case MkCfg{_, _, _, _, _, _, _, _, _, _, _, +ctl, _}:
+      Bool.not(U32.is_zero(U32.and(ctl, bit)))
+
+# --utc prints UTC (the biased offset 2^31 means zero).
+def tz_of(+cfg: Cfg, +tz: U32) -> U32:
+  Bool.pick(U32, cfg_flag(cfg, 128), 2147483648, tz)
+
+def list_line(+cfg: Cfg, +h: H.Header, name: List<&2, U32>, link: List<&2, U32>,
+  size: U32, mtime: U32, tz: U32) -> LF.Ln:
+  LF.line(cfg_lw(cfg), H.h_typeflag(h), H.h_mode(h), H.h_uname(h), H.h_gname(h),
+    H.h_uid(h), H.h_gid(h), cfg_flag(cfg, 32), size, H.h_devmajor(h),
+    H.h_devminor(h), LF.date_str(mtime, tz_of(cfg, tz), cfg_flag(cfg, 64)), name, link)
+
+def symlink_loud(+loud: U32) -> U32:
+  Bool.pick(U32, U32.is_eq(loud, 1), 3, loud)
+
+def hard_loud(+loud: U32) -> U32:
+  Bool.pick(U32, U32.is_eq(loud, 1), 4, loud)
+
+def keep_msg(loud: U32, np: List<&2, U32>, aux: List<&2, U32>) -> IO(Unit):
+  match loud:
+    case 0:
+      IO.pure(Unit, Unit{})
+    case 3:
+      IO.print_err("btar: " ++ keep_path(np) ++ ": Cannot create symlink to \u{2018}" ++
+        keep_path(aux) ++ "\u{2019}: File exists")
+    case 4:
+      IO.print_err("btar: " ++ keep_path(np) ++ ": Cannot hard link to \u{2018}" ++
+        keep_path(aux) ++ "\u{2019}: File exists")
+    case 1:
+      IO.print_err("btar: " ++ keep_path(np) ++ ": Cannot open: File exists")
+    case _:
+      IO.print_err("btar: Current \u{2018}" ++ keep_path(np) ++
+        "\u{2019} is newer or same age")
+
+def keep_cfg(loud: U32, +cfg: Cfg) -> Cfg:
+  match loud:
+    case 2:
+      cfg
+    case 0:
+      cfg
+    case _:
+      fail_cfg(cfg)
+
 def open_after(
   cr: X.Cre, fuel: Nat, archive: File, sink: File,
   root: List<&2, U32>, +cfg: Cfg, +lim: Lim.State,
   seen: List<&1, List<&2, U32>>, +glob: P.Pax, last: List<&2, U32>,
-  +mode: U32, +mtime: U32, +size: U32, +next: U32
+  np: List<&2, U32>, +mode: U32, +mtime: U32, +size: U32, +next: U32
 ) -> D:
   match cr:
+    case X.CrKeep{opened, loud}:
+      keep_d(opened, np, Nil{}, loud, U32.add(size, pad_of(size)), next, archive, sink,
+        root, cfg, lim, seen, glob)
     case X.CrFile{opened, file}:
       MkD{archive, sink, root, cfg, lim, seen, glob,
         EvCopy{opened, file, last, mode, mtime, size, next}}
@@ -658,12 +795,15 @@ def symlink_after(
   cr: X.Cre, fuel: Nat, archive: File, sink: File,
   root: List<&2, U32>, +cfg: Cfg, +lim: Lim.State,
   seen: List<&1, List<&2, U32>>, +glob: P.Pax, +last: List<&2, U32>,
-  +mtime: U32, +next: U32
+  np: List<&2, U32>, tg: List<&2, U32>, +mtime: U32, +next: U32
 ) -> D:
   match cr:
+    case X.CrKeep{opened, loud}:
+      keep_d(opened, np, tg, symlink_loud(loud), 0, next, archive, sink, root, cfg, lim, seen,
+        glob)
     case X.CrUnit{opened}:
       MkD{archive, sink, root, cfg, lim, seen, glob,
-        EvSymMeta{opened, last, mtime, next}}
+        EvSymMeta{opened, last, cfg_mt(cfg, mtime), next}}
     case X.CrFile{opened, file}:
       MkD{archive, sink, root, cfg, lim, seen, glob,
         EvFail{opened, 2, "btar: unexpected file create for a symlink"}}
@@ -675,9 +815,12 @@ def hardlink_after(
   cr: X.Cre, fuel: Nat, archive: File, sink: File,
   root: List<&2, U32>, +cfg: Cfg, +lim: Lim.State,
   seen: List<&1, List<&2, U32>>, +glob: P.Pax, +next: U32,
-  newpath: List<&2, U32>
+  newpath: List<&2, U32>, tg: List<&2, U32>
 ) -> D:
   match cr:
+    case X.CrKeep{opened, loud}:
+      keep_d(opened, newpath, tg, hard_loud(loud), 0, next, archive, sink, root, cfg, lim,
+        seen, glob)
     case X.CrUnit{opened}:
       MkD{archive, sink, root, cfg, lim, newpath <> seen, glob,
         EvCloseAll{opened, next}}
@@ -735,17 +878,50 @@ def warn_after(
   MkD{archive, sink, root, warn_cfg(cfg), lim, seen, glob,
     EvSkipData{off, next, U32.add(size, pad_of(size))}}
 
-def finish_warned(warned: Bool) -> IO(Unit):
-  match warned:
+# st bits: 1 warning (exit 1), 2 error (exit 2, GNU's trailer line).
+def finish_warned2(failed: Bool, warned: Bool) -> IO(Unit):
+  match failed:
     case True{}:
-      IO.exit(1)
+      do IO<Unit>:
+        u : Unit <- IO.print_err(
+          "btar: Exiting with failure status due to previous errors")
+        IO.exit(2)
     case False{}:
+      match warned:
+        case True{}:
+          IO.exit(1)
+        case False{}:
+          IO.pure(Unit, Unit{})
+
+def finish_warned(+st: U32) -> IO(Unit):
+  finish_warned2(Bool.not(U32.is_zero(U32.and(st, 2))),
+    Bool.not(U32.is_zero(U32.and(st, 1))))
+
+# Member operands that selected nothing: GNU's "Not found in archive", exit 2.
+def print_left(left: List<&2, List<&2, U32>>) -> IO(Unit):
+  match left:
+    case Nil{}:
       IO.pure(Unit, Unit{})
+    case op <> rest:
+      do IO<Unit>:
+        u : Unit <- IO.print_err("btar: " ++ B.list_show(op) ++
+          ": Not found in archive")
+        print_left(rest)
+
+def finish_left(left: List<&2, List<&2, U32>>, st: U32) -> IO(Unit):
+  match left:
+    case Nil{}:
+      finish_warned(st)
+    case _ <> _:
+      do IO<Unit>:
+        u : Unit <- print_left(left)
+        u2 : Unit <- IO.print_err("btar: Exiting with failure status due to previous errors")
+        IO.exit(2)
 
 def finish_cfg(+cfg: Cfg) -> IO(Unit):
   match cfg:
-    case MkCfg{_, _, _, _, _, _, +warned, _}:
-      finish_warned(warned)
+    case MkCfg{_, _, _, _, _, _, +st, _, _, left, _, _, _}:
+      finish_left(left, st)
 
 def hwt_after(
   w: X.Walk, fuel: Nat, archive: File, sink: File, root: List<&2, U32>,
@@ -895,7 +1071,7 @@ def walk_kind2(
   match kind:
     case 1:
       MkD{archive, sink, root, cfg, lim, seen, glob,
-        EvOpen{opened, last, mode, mtime, size, next}}
+        EvOpen{opened, last, newpath, mode, mtime, size, next}}
     case _:
       walk_kind3(fuel, archive, sink, root, cfg, lim, seen, glob, kind, mode,
         mtime, size, next, target, tanc, newpath, last, opened)
@@ -913,7 +1089,7 @@ def close_done(
         last, mode, mtime, next)
     case None{}:
       MkD{archive, sink, root, cfg, lim, seen, glob,
-        EvFMeta{opened, last, mode, mtime, next}}
+        EvFMeta{opened, last, mode, cfg_mt(cfg, mtime), next}}
 
 def want_parsed(
   archive: File, sink: File, root: List<&2, U32>, +cfg: Cfg, +lim: Lim.State,
@@ -951,7 +1127,7 @@ def walk_made(
   match kind:
     case 4:
       MkD{archive, sink, root, cfg, lim, seen, glob,
-        EvDir{opened, last, mode, mtime, next}}
+        EvDir{opened, last, mode, cfg_mt(cfg, mtime), next}}
     case _:
       walk_kind2(fuel, archive, sink, root, cfg, lim, seen, glob, kind, mode,
         mtime, size, next, target, tanc, newpath, last, opened)
@@ -1172,9 +1348,30 @@ def hard_norm2(
         archive, sink, root, cfg, lim, seen, glob, off, next, h, raw,
         verbose)
 
+def cfg_xf(+cfg: Cfg) -> List<&2, Xf.Xc>:
+  match cfg:
+    case MkCfg{_, _, _, _, _, _, _, _, _, _, xf, _, _}:
+      xf
+
+# Directory names are transformed without their trailing slash (GNU).
+def xf_ext(+xf: List<&2, Xf.Xc>, +name: List<&2, U32>) -> List<&2, U32>:
+  match xf:
+    case Nil{}:
+      name
+    case _ <> _:
+      Xf.apply(xf, Up.norm_cut(name))
+
+def xf_maybe(+xf: List<&2, Xf.Xc>, m: Maybe<&2, List<&2, U32>>) ->
+  Maybe<&2, List<&2, U32>>:
+  match m:
+    case None{}:
+      None{}
+    case Some{t}:
+      Some{Xf.apply(xf, t)}
+
 def cfg_strip(+cfg: Cfg) -> U32:
   match cfg:
-    case MkCfg{_, strip, _, _, _, _, _, _}:
+    case MkCfg{_, strip, _, _, _, _, _, _, _, _, _, _, _}:
       strip
 
 # Hardlink targets are archive paths: strip the same leading components as
@@ -1188,7 +1385,7 @@ def hard_norm(
   +h: H.Header, +norm: List<&2, U32>, +raw: List<&2, U32>, verbose: Bool
 ) -> D:
   hard_norm2(Pth.safe(max_component(), max_total(),
-    Pth.strip(cfg_strip(cfg), target)), fuel, archive,
+    Pth.strip(cfg_strip(cfg), xf_ext(cfg_xf(cfg), target))), fuel, archive,
     sink, root, cfg, lim, seen, glob, off, next, h, norm, raw, verbose)
 
 def hard_target(
@@ -1262,6 +1459,7 @@ def gl_run(fuel: Nat, st: Gl) -> Maybe<&2, U32>:
 
 # pax mtime may carry fractional seconds: use the integer part.
 
+
 def pax_u32(m: Maybe<&2, List<&2, U32>>) -> Maybe<&2, U32>:
   match m:
     case None{}:
@@ -1305,6 +1503,8 @@ def eff_mtime(+h: H.Header, +pend: E.Pend, +glob: P.Pax) -> U32:
           mtime_pend(p, glob, h)
         case None{}:
           mtime_glob(glob, h)
+
+
 
 # ---- driver record --------------------------------------------------------
 
@@ -1382,7 +1582,7 @@ def link_by_kind(
 ) -> D:
   match kind:
     case 3:
-      link_target(E.resolve_link(h, pend), fuel, archive, sink, root, cfg,
+      link_target(xf_maybe(cfg_xf(cfg), E.resolve_link(h, pend)), fuel, archive, sink, root, cfg,
         lim, seen, glob, off, next, h, norm, raw, verbose, pend)
     case _:
       hard_target(E.resolve_link(h, pend), fuel, archive, sink, root, cfg,
@@ -1506,7 +1706,7 @@ def apply_extract(
   +off: U32, +next: U32, +size: U32, +h: H.Header, +tag: H.Tag, +pend: E.Pend,
   +strip: U32, verbose: Bool
 ) -> D:
-  +raw = E.resolve_name(h, pend)
+  +raw = xf_ext(cfg_xf(cfg), E.resolve_name(h, pend))
   +stripped = Pth.strip(strip, raw)
   name_case(Lim.check_name(lim, U32.from_nat(len_nat(stripped))), stripped,
     fuel, archive, sink, root, cfg, lim, seen, glob, off, next, size, h, tag,
@@ -1534,7 +1734,7 @@ def apply_cfg2(
   +off: U32, +next: U32, +size: U32, +h: H.Header, +tag: H.Tag, +pend: E.Pend
 ) -> D:
   match cfg:
-    case MkCfg{extract, strip, verbose, _, to_stdout, _, _, _}:
+    case MkCfg{extract, strip, verbose, _, to_stdout, _, _, _, _, _, _, _, _}:
       match extract:
         case False{}:
           apply_list(fuel, archive, sink, root, cfg, lim, seen, glob, off,
@@ -1547,16 +1747,29 @@ def apply_cfg2(
 # is skipped: not listed, not extracted, its payload is read past.
 def cfg_exc(+cfg: Cfg) -> List<&2, List<&2, U32>>:
   match cfg:
-    case MkCfg{_, _, _, _, _, _, _, exc}:
+    case MkCfg{_, _, _, _, _, _, _, exc, _, _, _, _, _}:
       exc
 
-def cfg_excl(exc: List<&2, List<&2, U32>>, +h: H.Header, +pend: E.Pend) ->
-  Bool:
+def cfg_mem(+cfg: Cfg) -> List<&2, List<&2, U32>>:
+  match cfg:
+    case MkCfg{_, _, _, _, _, _, _, _, mem, _, _, _, _}:
+      mem
+
+def cfg_has_exc(exc: List<&2, List<&2, U32>>, +name: List<&2, U32>) -> Bool:
   match exc:
     case Nil{}:
       False{}
     case _ <> _:
-      Glob.excluded(exc, E.resolve_name(h, pend))
+      Glob.excluded(exc, name)
+
+def cfg_skip2(+ex: Bool, +sel: Bool) -> Bool:
+  Bool.or(ex, Bool.not(sel))
+
+# Skipped when excluded, or when member operands exist and none selects it.
+def cfg_excl(exc: List<&2, List<&2, U32>>, mem: List<&2, List<&2, U32>>,
+  +h: H.Header, +pend: E.Pend) -> Bool:
+  +name = E.resolve_name(h, pend)
+  cfg_skip2(cfg_has_exc(exc, name), Glob.selected(mem, name))
 
 def apply_cfg_skip(
   fuel: Nat, archive: File, sink: File, root: List<&2, U32>, +cfg: Cfg,
@@ -1579,12 +1792,32 @@ def apply_cfg_gate(
       apply_cfg2(fuel, archive, sink, root, cfg, lim, seen, glob, off, next,
         size, h, tag, pend)
 
+def cfg_hit(+cfg: Cfg, +h: H.Header, +pend: E.Pend) -> Cfg:
+  match cfg:
+    case MkCfg{extract, strip, verbose, preserve, to_stdout, euid, st, exc,
+        mem, left, xf, ctl, lw}:
+      MkCfg{extract, strip, verbose, preserve, to_stdout, euid, st, exc,
+        mem, Glob.unmatched(left, E.resolve_name(h, pend)), xf, ctl, lw}
+
+def apply_cfg_hit(
+  skip: Bool, fuel: Nat, archive: File, sink: File, root: List<&2, U32>,
+  +cfg: Cfg, +lim: Lim.State, seen: List<&1, List<&2, U32>>, +glob: P.Pax,
+  +off: U32, +next: U32, +size: U32, +h: H.Header, +tag: H.Tag, +pend: E.Pend
+) -> D:
+  match skip:
+    case True{}:
+      apply_cfg_gate(skip, fuel, archive, sink, root, cfg, lim, seen, glob,
+        off, next, size, h, tag, pend)
+    case False{}:
+      apply_cfg_gate(skip, fuel, archive, sink, root, cfg_hit(cfg, h, pend),
+        lim, seen, glob, off, next, size, h, tag, pend)
+
 def apply_cfg(
   fuel: Nat, archive: File, sink: File, root: List<&2, U32>, +cfg: Cfg,
   +lim: Lim.State, seen: List<&1, List<&2, U32>>, +glob: P.Pax,
   +off: U32, +next: U32, +size: U32, +h: H.Header, +tag: H.Tag, +pend: E.Pend
 ) -> D:
-  apply_cfg_gate(cfg_excl(cfg_exc(cfg), h, pend), fuel,
+  apply_cfg_hit(cfg_excl(cfg_exc(cfg), cfg_mem(cfg), h, pend), fuel,
     archive, sink, root, cfg, lim, seen, glob, off, next, size, h, tag, pend)
 
 def apply_next(
@@ -1647,6 +1880,17 @@ def drive(fuel: Nat, d: D) -> IO(Unit):
                     Fx.Stdout.write(bstr_nl(name))
                   drive(pf, print_after(pr, 0n, archive, sink, root, cfg, lim, seen,
                     glob, nxt))
+              case EvList{+h, +pend, glob2, +size, nxt}:
+                +pf : Nat = p
+                +mtime : U32 = eff_mtime(h, pend, glob2)
+                do IO<Unit>:
+                  tz : U32 <- Fx.Fs.tzoff(mtime)
+                  +ln : LF.Ln = list_line(cfg, h, E.resolve_name(h, pend),
+                    link_of(E.resolve_link(h, pend)), size, mtime, tz)
+                  pr : Result<&1, &1, U32 & String, Unit> <-
+                    Fx.Stdout.write(bstr_nl(LF.ln_line(ln)))
+                  drive(pf, print_after(pr, 0n, archive, sink, root,
+                    cfg_set_lw(cfg, LF.ln_w(ln)), lim, seen, glob, nxt))
               case EvSkipData{+off, +next, +size}:
                 +pf : Nat = p
                 do IO<Unit>:
@@ -1667,12 +1911,22 @@ def drive(fuel: Nat, d: D) -> IO(Unit):
                   mr : X.MetaRes <- X.make_dir(pf, opened, last, mode, mtime)
                   drive(pf, dir_after(mr, 0n, archive, sink, root, cfg, lim,
                     seen, glob, next))
-              case EvOpen{opened, +last, +mode, +mtime, +size, +next}:
+              case EvOpen{opened, +last, +np, +mode, +mtime, +size, +next}:
                 +pf : Nat = p
                 do IO<Unit>:
-                  cr : X.Cre <- X.create_file_run(pf, opened, last, mode)
+                  cr : X.Cre <- X.create_file_run(pf, opened, last, mode,
+                    cfg_pm(cfg, mtime))
                   drive(pf, open_after(cr, 0n, archive, sink, root, cfg, lim, seen, glob,
-                    last, mode, mtime, size, next))
+                    last, np, mode, mtime, size, next))
+              case EvKeep{opened, np, aux, +loud, skip, next}:
+                +pf : Nat = p
+                do IO<Unit>:
+                  u : Unit <- X.close_all(pf, opened)
+                  m : Unit <- keep_msg(loud, np, aux)
+                  pr : File & (File & Result<&1, &1, U32 & String, Unit>) <-
+                    Fx.Data.copy(archive, sink, skip)
+                  drive(pf, skip_after(pr, 0n, root, keep_cfg(loud, cfg), lim,
+                    seen, glob, next))
               case EvCopy{opened, dest, +last, +mode, +mtime, +size, +next}:
                 +pf : Nat = p
                 do IO<Unit>:
@@ -1700,18 +1954,20 @@ def drive(fuel: Nat, d: D) -> IO(Unit):
                   mr : X.MetaRes <- X.set_file_meta(pf, opened, last, mode, mtime)
                   drive(pf, fmeta_after(mr, 0n, archive, sink, root, cfg, lim, seen, glob,
                     next))
-              case EvSymlink{opened, +last, +target, +mtime, +next}:
+              case EvSymlink{opened, +last, +np, +target, +mtime, +next}:
                 +pf : Nat = p
                 do IO<Unit>:
-                  cr : X.Cre <- X.create_symlink_run(pf, opened, last, target)
+                  cr : X.Cre <- X.create_symlink_run(pf, opened, last, target,
+                    cfg_pm(cfg, mtime))
                   drive(pf, symlink_after(cr, 0n, archive, sink, root, cfg,
-                    lim, seen, glob, last, mtime, next))
+                    lim, seen, glob, last, np, target, mtime, next))
               case EvHardlink{opened, +last, +target, +next, +newpath}:
                 +pf : Nat = p
                 do IO<Unit>:
-                  cr : X.Cre <- X.create_hardlink_run(pf, opened, last, target)
+                  cr : X.Cre <- X.create_hardlink_run(pf, opened, last, target,
+                    cfg_pm(cfg, 0))
                   drive(pf, hardlink_after(cr, 0n, archive, sink, root, cfg, lim, seen,
-                    glob, next, newpath))
+                    glob, next, newpath, target))
               case EvHStat{opened, +last, +target, +next, +newpath}:
                 match opened:
                   case Nil{}:

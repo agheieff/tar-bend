@@ -8,7 +8,7 @@ fail=0
 echo "== bend --check-only (pure modules)"
 for f in src/*.bend; do
   case "$f" in
-    src/read_stream.bend|src/extract.bend|src/write.bend|src/gzio.bend|src/append.bend) continue ;;  # effects: foreign defs, see compile gate
+    src/read_stream.bend|src/extract.bend|src/write.bend|src/gzio.bend|src/append.bend|src/rewrite.bend) continue ;;  # effects: foreign defs, see compile gate
   esac
   if ! out=$(bend --check-only "$f" 2>&1); then
     echo "FAIL check-only: $f"; echo "$out" | tail -5; fail=1
