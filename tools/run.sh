@@ -162,6 +162,7 @@ append_test() {
     BTAR="$BTAR_BIN" "$ROOT/tools/test_stdio.sh"
     BTAR="$BTAR_BIN" "$ROOT/tools/test_options.sh"
     BTAR="$BTAR_BIN" "$ROOT/tools/test_diff.sh"
+    BTAR="$BTAR_BIN" "$ROOT/tools/test_select.sh"
     python3 "$ROOT/tools/fuzz_append.py" --bin "$BTAR_BIN" --iterations 300
   else
     echo "append: SKIP (tools/test_append.sh missing)"

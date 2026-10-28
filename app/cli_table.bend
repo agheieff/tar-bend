@@ -724,8 +724,6 @@ def refused(+id: U32) -> Bool:
       True{}
     case 33:
       True{}
-    case 34:
-      True{}
     case 37:
       True{}
     case 38:
@@ -810,8 +808,6 @@ def refused(+id: U32) -> Bool:
       True{}
     case 105:
       True{}
-    case 108:
-      True{}
     case 109:
       True{}
     case 110:
@@ -828,8 +824,6 @@ def refused(+id: U32) -> Bool:
       True{}
     case 116:
       True{}
-    case 117:
-      True{}
     case 118:
       True{}
     case 119:
@@ -838,17 +832,11 @@ def refused(+id: U32) -> Bool:
       True{}
     case 121:
       True{}
-    case 122:
-      True{}
     case 123:
       True{}
     case 125:
       True{}
     case 126:
-      True{}
-    case 127:
-      True{}
-    case 128:
       True{}
     case 129:
       True{}

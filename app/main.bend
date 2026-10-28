@@ -530,11 +530,15 @@ def arch_out(+p: List<&2, U32>) -> List<&2, U32>:
 def arch_in(+p: List<&2, U32>) -> List<&2, U32>:
   dash_map(beq(p, bstr("-")), "/dev/stdin", p)
 
+# Verbose names go to stdout, or to stderr when the archive itself is on stdout.
+def verb_code(+verbose: Bool, +archive: List<&2, U32>) -> U32:
+  Bool.pick(U32, verbose, Bool.pick(U32, beq(archive, bstr("-")), 2, 1), 0)
+
 def run_create(o: COpts, gz: Bool, +wo: Wr.Wo) -> IO(Unit):
   match o:
-    case MkCOpts{archive, root, verbose, preserve, fmt, paths}:
+    case MkCOpts{+archive, root, verbose, preserve, fmt, paths}:
       cgate_gz(gz, c_root_bytes(root), arch_out(archive),
-        Wr.MkCfg{fmt, preserve, verbose, Wr.wo_xf(wo), Wr.wo_ov(wo)}, paths, wo)
+        Wr.MkCfg{fmt, preserve, verb_code(verbose, archive), Wr.wo_xf(wo), Wr.wo_ov(wo)}, paths, wo)
 
 # ---- v1.2 append / update (-r / -u) -------------------------------------
 
@@ -593,9 +597,9 @@ def append_go(+rootb: List<&2, U32>, archive: List<&2, U32>, +cfg: Wr.WCfg,
 
 def run_append(o: COpts, +wo: Wr.Wo, upd: Bool) -> IO(Unit):
   match o:
-    case MkCOpts{archive, root, verbose, preserve, fmt, paths}:
+    case MkCOpts{+archive, root, verbose, preserve, fmt, paths}:
       append_go(c_root_bytes(root), archive,
-        Wr.MkCfg{fmt, preserve, verbose, Wr.wo_xf(wo), Wr.wo_ov(wo)}, paths, wo, upd)
+        Wr.MkCfg{fmt, preserve, verb_code(verbose, archive), Wr.wo_xf(wo), Wr.wo_ov(wo)}, paths, wo, upd)
 
 # -A / --delete: the archive operand is rewritten in place; operands are
 # archives (-A) or member names (--delete), taken verbatim.
@@ -1091,22 +1095,76 @@ def ov_fin2(ok: Bool, ov: Wr.Ov) -> IO(Wr.Ov):
     case False{}:
       IO.die(Wr.Ov, 2, "btar: invalid --mode value")
 
-def ov_fin(o: Idr, g: Idr, mt: U32, mm: Op.Mm, numeric: Bool) -> IO(Wr.Ov):
+def ov_fin(o: Idr, g: Idr, mt: U32, nw: U32, fl: U32, mm: Op.Mm, numeric: Bool) ->
+  IO(Wr.Ov):
   match o:
     case MkIdr{uid, un}:
       match g:
         case MkIdr{gid, gn}:
           match mm:
             case Op.MkMm{mand, mor, mx, ok}:
-              ov_fin2(ok, Wr.MkOv{uid, un, gid, gn, mand, mor, mx, mt, numeric})
+              ov_fin2(ok, Wr.MkOv{uid, un, gid, gn, mand, mor, mx, mt, numeric, nw, fl})
+
+# --newer, --newer-mtime and --after-date all reduce to one threshold here (0 = none; the
+# oldest of the given dates wins, which is the loosest filter).
+def nw_pick(+a: U32, +b: U32) -> U32:
+  Bool.pick(U32, U32.is_zero(a), b, Bool.pick(U32, U32.is_zero(b), a, U32.min(a, b)))
+
+def nw_of3(x: U32, y: U32, z: U32) -> IO(U32):
+  IO.pure(U32, nw_pick(nw_pick(x, y), z))
+
+def nw_one(m: Maybe<&2, List<&2, U32>>) -> IO(U32):
+  match m:
+    case None{}:
+      IO.pure(U32, 0)
+    case Some{v}:
+      mt_str(v)
+
+def nw_of(a: Maybe<&2, List<&2, U32>>, b: Maybe<&2, List<&2, U32>>,
+  c: Maybe<&2, List<&2, U32>>) -> IO(U32):
+  do IO<U32>:
+    x : U32 <- nw_one(a)
+    y : U32 <- nw_one(b)
+    z : U32 <- nw_one(c)
+    nw_of3(x, y, z)
+
+# Ov flag bits: 1 --remove-files, 2 --one-file-system, 4 --ignore-failed-read.
+def ov_flags(+items: List<&2, T.Item>) -> U32:
+  U32.or(Bool.pick(U32, Cl.has_opt(items, Tb.o_remove_files()), 1, 0),
+    U32.or(Bool.pick(U32, Cl.has_opt(items, Tb.o_one_file_system()), 2, 0),
+      Bool.pick(U32, Cl.has_opt(items, Tb.o_ignore_failed_read()), 4, 0)))
 
 def build_ov(+items: List<&2, T.Item>) -> IO(Wr.Ov):
   do IO<Wr.Ov>:
     o : Idr <- ov_id(0, Cl.opt_last(items, Tb.o_owner()))
     g : Idr <- ov_id(1, Cl.opt_last(items, Tb.o_group()))
     mt : U32 <- mt_of(Cl.opt_last(items, Tb.o_mtime()))
-    ov_fin(o, g, mt, mm_of(Cl.opt_last(items, Tb.o_mode())),
+    nw : U32 <- nw_of(Cl.opt_last(items, Tb.o_newer()),
+      Cl.opt_last(items, Tb.o_newer_mtime()), Cl.opt_last(items, Tb.o_after_date()))
+    ov_fin(o, g, mt, nw, ov_flags(items), mm_of(Cl.opt_last(items, Tb.o_mode())),
       Cl.has_opt(items, Tb.o_numeric_owner()))
+
+# --exclude-vcs / --exclude-backups are fixed exclusion patterns (GNU's lists).
+def pat_list(xs: List<&2, String>) -> List<&2, List<&2, U32>>:
+  match xs:
+    case Nil{}:
+      Nil{}
+    case h <> t:
+      bstr(h) <> pat_list(t)
+
+def vcs_pats() -> List<&2, List<&2, U32>>:
+  pat_list(["CVS", "RCS", "SCCS", ".git", ".gitignore", ".gitattributes",
+    ".gitmodules", ".svn", ".arch-ids", "{arch}", "=RELEASE-ID", "=meta-update",
+    "=update", ".bzr", ".bzrignore", ".bzrtags", ".hg", ".hgignore", ".hgtags",
+    "_darcs", ".cvsignore"])
+
+def bak_pats() -> List<&2, List<&2, U32>>:
+  pat_list(["*~", "#*#", ".#*"])
+
+def auto_pats(+items: List<&2, T.Item>) -> List<&2, List<&2, U32>>:
+  app_pl(Bool.pick(List<&2, List<&2, U32>>, Cl.has_opt(items, Tb.o_exclude_vcs()),
+    vcs_pats(), Nil{}), Bool.pick(List<&2, List<&2, U32>>,
+    Cl.has_opt(items, Tb.o_exclude_backups()), bak_pats(), Nil{}))
 
 def launch(+items: List<&2, T.Item>, mask: U32) -> IO(Unit):
   do IO<Unit>:
@@ -1120,7 +1178,7 @@ def launch(+items: List<&2, T.Item>, mask: U32) -> IO(Unit):
       Cl.opt_args2(items, Tb.o_transform(), Tb.o_xform()))
     +ov : Wr.Ov <- build_ov(items)
     +wo : Wr.Wo = Wr.MkWo{sortf, U.TNil{},
-      app_pl(Cl.opt_args(items, Tb.o_exclude()), fl),
+      app_pl(Cl.opt_args(items, Tb.o_exclude()), app_pl(fl, auto_pats(items))),
       Cl.has_opt(items, Tb.o_no_recursion()), xf, ov}
     +ops : List<&2, List<&2, U32>> = rev_cat(Cl.operands(items), tl)
     launch2(items, mask, wo, ops, xf)

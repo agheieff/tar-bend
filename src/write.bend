@@ -17,19 +17,20 @@ import ../src/limits.bend as Lim
 import ../src/upd.bend as U
 import ../src/glob.bend as Glob
 import ../src/xform.bend as Xf
+import ../src/listfmt.bend as LF
 import ../effs/effects.bend as Fx
 
 # ---- pure helpers --------------------------------------------------------
 
 type Ov is Data:
   MkOv{uid: U32, un: List<&2, U32>, gid: U32, gn: List<&2, U32>, mand: U32,
-    mor: U32, mx: U32, mt: U32, numeric: Bool}
+    mor: U32, mx: U32, mt: U32, numeric: Bool, nw: U32, fl: U32}
 
 def no_ov() -> Ov:
-  MkOv{4294967295, Nil{}, 4294967295, Nil{}, 4294967295, 0, 0, 4294967295, False{}}
+  MkOv{4294967295, Nil{}, 4294967295, Nil{}, 4294967295, 0, 0, 4294967295, False{}, 0, 0}
 
 type WCfg is Data:
-  MkCfg{fmt: U32, preserve: Bool, verbose: Bool, xf: List<&2, Xf.Xc>, ov: Ov}
+  MkCfg{fmt: U32, preserve: Bool, verbose: U32, xf: List<&2, Xf.Xc>, ov: Ov}
 
 type Plan is Data:
   POk{blocks: List<&2, List<&2, U32>>}
@@ -447,22 +448,22 @@ def ov_mode2(+m: U32, +kind: U32, +mx: U32) -> U32:
 
 def ov_mode(+ov: Ov, +kind: U32, +m: U32) -> U32:
   match ov:
-    case MkOv{_, _, _, _, +mand, +mor, +mx, _, _}:
+    case MkOv{_, _, _, _, +mand, +mor, +mx, _, _, _, _}:
       ov_mode2(U32.or(U32.and(m, mand), mor), kind, mx)
 
 def ov_uid(+ov: Ov, +v: U32) -> U32:
   match ov:
-    case MkOv{uid, _, _, _, _, _, _, _, _}:
+    case MkOv{uid, _, _, _, _, _, _, _, _, _, _}:
       ov_pick(v, uid)
 
 def ov_gid(+ov: Ov, +v: U32) -> U32:
   match ov:
-    case MkOv{_, _, gid, _, _, _, _, _, _}:
+    case MkOv{_, _, gid, _, _, _, _, _, _, _, _}:
       ov_pick(v, gid)
 
 def ov_mt(+ov: Ov, +v: U32) -> U32:
   match ov:
-    case MkOv{_, _, _, _, _, _, _, mt, _}:
+    case MkOv{_, _, _, _, _, _, _, mt, _, _, _}:
       ov_pick(v, mt)
 
 def hdr_of(ent: Ent, +cfg: WCfg) -> H.Header:
@@ -677,14 +678,27 @@ def lim_nm(lim: Lim.State, name: List<&2, U32>) -> IO(Lim.State):
 def cfg_of(w: WCfg) -> WCfg:
   w
 
-def verb2(v: Bool, name: List<&2, U32>) -> IO(Unit):
-  match v:
-    case True{}:
-      do IO<Unit>:
-        u : Unit <- IO.print_err(bytes_str(name))
-        IO.pure(Unit, Unit{})
-    case False{}:
+# v: 0 silent, 1 names on stdout (GNU), 2 on stderr (the archive itself goes to stdout).
+def verb_out(r: Result<&1, &1, U32 & String, Unit>) -> IO(Unit):
+  match r:
+    case Done{u}:
       IO.pure(Unit, Unit{})
+    case Fail{(code, msg)}:
+      IO.die(Unit, 2, "btar: write: " ++ msg)
+
+def verb2(v: U32, name: List<&2, U32>) -> IO(Unit):
+  match v:
+    case 0:
+      IO.pure(Unit, Unit{})
+    case 1:
+      do IO<Unit>:
+        r : Result<&1, &1, U32 & String, Unit> <-
+          Fx.Stdout.write(B.list_cat(LF.quote(name), 10 <> Nil{}))
+        verb_out(r)
+    case _:
+      do IO<Unit>:
+        u : Unit <- IO.print_err(bytes_str(LF.quote(name)))
+        IO.pure(Unit, Unit{})
 
 def verb_io(+cfg: WCfg, name: List<&2, U32>) -> IO(Unit):
   match cfg:
@@ -872,22 +886,22 @@ def id_name_for(kind: U32, id: U32, given: List<&2, U32>, skip: Bool) ->
 
 def ov_skip_u(+ov: Ov) -> Bool:
   match ov:
-    case MkOv{_, _, _, _, _, _, _, _, numeric}:
+    case MkOv{_, _, _, _, _, _, _, _, numeric, _, _}:
       numeric
 
 def ov_skip_g(+ov: Ov) -> Bool:
   match ov:
-    case MkOv{_, _, _, _, _, _, _, _, numeric}:
+    case MkOv{_, _, _, _, _, _, _, _, numeric, _, _}:
       numeric
 
 def ov_un(ov: Ov) -> List<&2, U32>:
   match ov:
-    case MkOv{_, un, _, _, _, _, _, _, _}:
+    case MkOv{_, un, _, _, _, _, _, _, _, _, _}:
       un
 
 def ov_gn(ov: Ov) -> List<&2, U32>:
   match ov:
-    case MkOv{_, _, _, gn, _, _, _, _, _}:
+    case MkOv{_, _, _, gn, _, _, _, _, _, _, _}:
       gn
 
 def with_names(h: H.Header, un: List<&2, U32>, gn: List<&2, U32>) -> H.Header:
@@ -1091,13 +1105,37 @@ def cx_add_if(skip: Bool, +cx: Cx, +ent: Ent) -> Cx:
 def dir_mt(+kind: U32, +mt: U32) -> U32:
   Bool.pick(U32, U32.is_eq(kind, 53), 0, mt)
 
+def ov_nw(ov: Ov) -> U32:
+  match ov:
+    case MkOv{_, _, _, _, _, _, _, _, _, nw, _}:
+      nw
+
+def ov_fl(ov: Ov) -> U32:
+  match ov:
+    case MkOv{_, _, _, _, _, _, _, _, _, _, fl}:
+      fl
+
+# --newer / --newer-mtime / --after-date: non-directories not newer than the date are
+# left out (directories are always archived; mtime only, ctime is not consulted).
+def too_old(+nw: U32, +kind: U32, +mt: U32) -> Bool:
+  Bool.and(Bool.not(U32.is_zero(nw)), Bool.and(Bool.not(U32.is_eq(kind, 53)),
+    Bool.and(Bool.not(U32.is_eq(kind, 99)), U32.is_le(mt, nw))))
+
+def cx_newer(+cx: Cx) -> U32:
+  match cx:
+    case MkCx{root, ops, acc, refs, wo}:
+      match wo:
+        case MkWo{sort, upd, exc, norec, xf, ov}:
+          ov_nw(ov)
+
 # `-u`: an entry whose archived copy is at least as new is not appended
 # (warning placeholders, kind 99, are never filtered).
 def ent_skip(+cx: Cx, +ent: Ent) -> Bool:
   match ent:
-    case MkEnt{name, kind, mode, uid, gid, sz, mt, link}:
-      Bool.and(Bool.not(U32.is_eq(kind, 99)),
-        U.skip(cx_upd(cx), name, dir_mt(kind, mt)))
+    case MkEnt{name, +kind, mode, uid, gid, sz, +mt, link}:
+      Bool.or(Bool.and(Bool.not(U32.is_eq(kind, 99)),
+        U.skip(cx_upd(cx), name, dir_mt(kind, mt))),
+        too_old(cx_newer(cx), kind, mt))
 
 def cx_add(+cx: Cx, +ent: Ent) -> Cx:
   cx_add_if(ent_skip(cx, ent), cx, ent)
@@ -1382,7 +1420,8 @@ def cx_keep_reg_if(skip: Bool, +cx: Cx, +st: List<&2, U32>,
         refs_keep(st, aname, cx_refs_of(cx)))
 
 def cx_keep_reg(+cx: Cx, +st: List<&2, U32>, +aname: List<&2, U32>) -> Cx:
-  cx_keep_reg_if(U.skip(cx_upd(cx), aname, st_mtime(st)), cx, st, aname)
+  cx_keep_reg_if(Bool.or(U.skip(cx_upd(cx), aname, st_mtime(st)),
+    too_old(cx_newer(cx), 48, st_mtime(st))), cx, st, aname)
 
 def op_keep_reg2(hit: Maybe<&2, List<&2, U32>>, +cx: Cx,
   +aname: List<&2, U32>, +st: List<&2, U32>) -> CSt:
@@ -1559,7 +1598,8 @@ def stat_done(
 
 def cx_keep_named(+cx: Cx, +st: List<&2, U32>,
   +nm: List<&2, U32>) -> Cx:
-  cx_keep_reg_if(U.skip(cx_upd(cx), nm, st_mtime(st)), cx, st, nm)
+  cx_keep_reg_if(Bool.or(U.skip(cx_upd(cx), nm, st_mtime(st)),
+    too_old(cx_newer(cx), 48, st_mtime(st))), cx, st, nm)
 
 def reg_go(hit: Maybe<&2, List<&2, U32>>, +cx: Cx, stack: Stack,
   +rel: List<&2, U32>, +fname: List<&2, U32>, +st: List<&2, U32>) -> CSt:
@@ -1970,10 +2010,74 @@ def write_all(fuel: Nat, ws: WS) -> IO(Bool):
 
 # `start` is the archive offset the writer begins at (append): it seeds the
 # byte total so the 4 GiB v1 cap also covers the existing archive.
-def write_from(archive: File, selfid: List<&2, U32>, base: List<&2, U32>,
-  ents: List<&2, Ent>, cfg: WCfg, start: U32) -> IO(Bool):
-  write_all(1048576n, WsRun{archive, base, ents, cfg,
-    Lim.MkState{Lim.default_limits(), 0, start}, False{}, selfid})
+# --remove-files: after a clean write, delete what was archived (files first, then the
+# directories, deepest first).
+def rm_path2(root: Bool, base: List<&2, U32>, nm: List<&2, U32>) -> List<&2, U32>:
+  match root:
+    case True{}:
+      base
+    case False{}:
+      B.list_cat(base, 47 <> nm)
+
+# The "./" root entry removes the -C directory itself (GNU does the same).
+def rm_path(base: List<&2, U32>, +name: List<&2, U32>) -> List<&2, U32>:
+  rm_path2(B.eq_list(U.norm_cut(name), 46 <> Nil{}, True{}), base, U.norm_cut(name))
+
+def rm_res(r: Result<&1, &1, U32 & String, Unit>, name: List<&2, U32>) -> IO(Unit):
+  match r:
+    case Done{u}:
+      IO.pure(Unit, Unit{})
+    case Fail{(code, msg)}:
+      IO.print_err("btar: " ++ bytes_str(name) ++ ": Cannot remove: " ++ msg)
+
+def rm_one(base: List<&2, U32>, +name: List<&2, U32>, isdir: U32) -> IO(Unit):
+  do IO<Unit>:
+    r : Result<&1, &1, U32 & String, Unit> <-
+      Fx.Fs.remove_path(rm_path(base, name), isdir)
+    rm_res(r, name)
+
+def rm_kind(kind: U32, base: List<&2, U32>, name: List<&2, U32>) -> IO(Unit):
+  match kind:
+    case 99:
+      IO.pure(Unit, Unit{})
+    case 53:
+      rm_one(base, name, 1)
+    case _:
+      rm_one(base, name, 0)
+
+def rm_all(fuel: Nat, +base: List<&2, U32>, ents: List<&2, Ent>) -> IO(Unit):
+  match fuel:
+    case 0n:
+      IO.pure(Unit, Unit{})
+    case 1n+p:
+      match ents:
+        case Nil{}:
+          IO.pure(Unit, Unit{})
+        case MkEnt{name, kind, _, _, _, _, _, _} <> t:
+          do IO<Unit>:
+            u : Unit <- rm_kind(kind, base, name)
+            rm_all(p, base, t)
+
+def rm_flag2(off: Bool, base: List<&2, U32>, ents: List<&2, Ent>, w: Bool) ->
+  IO(Bool):
+  match off:
+    case True{}:
+      IO.pure(Bool, w)
+    case False{}:
+      do IO<Bool>:
+        u : Unit <- rm_all(1048576n, base, rev_ent(ents, Nil{}))
+        IO.pure(Bool, w)
+
+def rm_flag(base: List<&2, U32>, ents: List<&2, Ent>, cfg: WCfg, w: Bool) ->
+  IO(Bool):
+  rm_flag2(U32.is_zero(U32.and(ov_fl(cfg_ov(cfg)), 1)), base, ents, w)
+
+def write_from(archive: File, selfid: List<&2, U32>, +base: List<&2, U32>,
+  +ents: List<&2, Ent>, +cfg: WCfg, start: U32) -> IO(Bool):
+  do IO<Bool>:
+    w : Bool <- write_all(1048576n, WsRun{archive, base, ents, cfg,
+      Lim.MkState{Lim.default_limits(), 0, start}, False{}, selfid})
+    rm_flag(base, ents, cfg, w)
 
 def write_to(archive: File, selfid: List<&2, U32>, base: List<&2, U32>,
   ents: List<&2, Ent>, cfg: WCfg) -> IO(Bool):

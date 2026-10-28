@@ -36,7 +36,7 @@ Every GNU tar 1.35 option below is recognised by the parser (`app/cli.bend`); st
 | `--overwrite` | no | implemented |
 | `--overwrite-dir` | no | refused (exit 2) |
 | `--recursive-unlink` | no | refused (exit 2) |
-| `--remove-files` | no | refused (exit 2) |
+| `--remove-files` | no | implemented |
 | `--skip-old-files` | no | implemented |
 | `-U`, `--unlink-first` | no | implemented |
 | `-W`, `--verify` | no | refused (exit 2) |
@@ -110,7 +110,7 @@ Every GNU tar 1.35 option below is recognised by the parser (`app/cli.bend`); st
 | `--backup` | optional | refused (exit 2) |
 | `-C`, `--directory` | yes | implemented |
 | `--exclude` | yes | implemented |
-| `--exclude-backups` | no | refused (exit 2) |
+| `--exclude-backups` | no | implemented |
 | `--exclude-caches` | no | refused (exit 2) |
 | `--exclude-caches-all` | no | refused (exit 2) |
 | `--exclude-caches-under` | no | refused (exit 2) |
@@ -119,18 +119,18 @@ Every GNU tar 1.35 option below is recognised by the parser (`app/cli.bend`); st
 | `--exclude-tag` | yes | refused (exit 2) |
 | `--exclude-tag-all` | yes | refused (exit 2) |
 | `--exclude-tag-under` | yes | refused (exit 2) |
-| `--exclude-vcs` | no | refused (exit 2) |
+| `--exclude-vcs` | no | implemented |
 | `--exclude-vcs-ignores` | no | refused (exit 2) |
 | `-h`, `--dereference` | no | refused (exit 2) |
 | `--hard-dereference` | no | refused (exit 2) |
 | `-K`, `--starting-file` | yes | refused (exit 2) |
-| `--newer-mtime` | yes | refused (exit 2) |
+| `--newer-mtime` | yes | implemented |
 | `--no-null` | no | refused (exit 2) |
 | `--no-recursion` | no | implemented |
 | `--no-unquote` | no | refused (exit 2) |
 | `--null` | no | refused (exit 2) |
-| `-N`, `--newer` | yes | refused (exit 2) |
-| `--after-date` | yes | refused (exit 2) |
+| `-N`, `--newer` | yes | implemented |
+| `--after-date` | yes | implemented |
 | `--one-file-system` | no | refused (exit 2) |
 | `-P`, `--absolute-names` | no | refused (exit 2) |
 | `--recursion` | no | implemented |
@@ -178,4 +178,6 @@ Every GNU tar 1.35 option below is recognised by the parser (`app/cli.bend`); st
 | `--version` | no | implemented |
 | `--quiet` | no | accepted, no effect |
 
-50 implemented, 100 refused, 23 accepted and ignored.
+56 implemented, 94 refused, 23 accepted and ignored.
+
+Notes: `--newer` and `--after-date` compare mtime only (GNU also looks at ctime); `-vv` on create prints names like `-v`.

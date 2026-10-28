@@ -82,6 +82,11 @@ def Fs.linkat_at(from_dir: File, from_name: List<&2, U32>, to_dir: File,
   import "./fs.c"
   import "./fs.js"
 
+def Fs.remove_path(path: List<&2, U32>, isdir: U32) ->
+  IO(Result<&1, &1, U32 & String, Unit>):
+  import "./fs.c"
+  import "./fs.js"
+
 def Fs.tzoff(t: U32) -> IO(U32):
   import "./fs.c"
   import "./fs.js"

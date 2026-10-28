@@ -322,6 +322,13 @@ function fs_tzoff(t) {
 
 io_eff(CID(Fs.tzoff), fs_tzoff);
 
+// Fs.remove_path: native-only.
+function fs_remove_path(path, isdir) {
+  return io_fail(38);
+}
+
+io_eff(CID(Fs.remove_path), fs_remove_path);
+
 // Fs.id_name / Fs.name_id: no passwd database in the JS lane.
 function fs_id_name(kind, id) {
   return io_fail(2);

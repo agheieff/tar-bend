@@ -945,6 +945,28 @@ Term fs_name_id_run(Env e, Term* f, IoWork* w) {
   return fs_inline(e, w, fs_name_id_call, fs_name_id_pack);
 }
 
+// Fs.remove_path(path, isdir) -> Result<..., Unit>: unlink(2) / rmdir(2) of a whole path
+// (--remove-files; the path was just archived from the same operand tree).
+static Term fs_unit_res_pack(Env e, IoWork* w) {
+  fs_clear(w);
+  return io_res(e, w, term_pak(CID(Unit), 0));
+}
+
+static void fs_remove_path_call(IoWork* w) {
+  int n = w->word != 0 ? rmdir((const char*)w->text) : unlink((const char*)w->text);
+  w->code = n != 0 ? (u32)errno : 0;
+}
+
+Term fs_remove_path_run(Env e, Term* f, IoWork* w) {
+  w->word = (uint32_t)f[1];
+  w->text = io_cbuf(e, f[0], &w->size, CID(Con));
+  w->code = (w->text == NULL || w->size == 0) ? EINVAL : 0;
+  if (w->code != 0) {
+    return fs_unit_res_pack(e, w);
+  }
+  return fs_inline(e, w, fs_remove_path_call, fs_unit_res_pack);
+}
+
 // Fs.statx(dir, name) -> dir & Result<..., List<U32>>; lstat fields in fixed
 // order: [type, mode, nlink, uid, gid, size, mtime, ino_lo, ino_hi, dev_lo,
 // dev_hi]. type matches fstatat meta (S_IFMT >> 12): 8 reg, 4 dir, 10 link,
@@ -1538,6 +1560,9 @@ static void __attribute__((constructor)) btar_fs_use(void) {
 #endif
 #ifdef CID(Fs.readlink_path)
   io_eff(CID(Fs.readlink_path), fs_readlink_path_run);
+#endif
+#ifdef CID(Fs.remove_path)
+  io_eff(CID(Fs.remove_path), fs_remove_path_run);
 #endif
 #ifdef CID(Fs.tzoff)
   io_eff(CID(Fs.tzoff), fs_tzoff_run);
