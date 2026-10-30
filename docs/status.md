@@ -1,6 +1,6 @@
 # tar-bend status
 
-Updated: 2026-10-25 (v1.2.0 — append/update, exclusion, CI; builds on v1.1.0 streaming/parallel gzip).
+Updated: 2026-10-30 (v1.3.0 — GNU option parser, stdin/stdout, --delete, -A, --transform, -d, create-side selection; full release gate 17/17 PASS on 2026-10-30). The milestone table and 1.2.0 evidence below are from the 1.2.0 release.
 
 ## Toolchain
 
@@ -51,7 +51,7 @@ v1.0.0 history: [release-notes-1.0.0.md](release-notes-1.0.0.md). v1.1.0:
   `--delete`, `-A` ([rewrite.md](rewrite.md), 28 checks), `--transform` ([transform.md](transform.md), 54 + ~350 sed checks);
   member operands + `-T` (`tools/test_members.sh`, 30 checks, incl. "Not found in archive" vs GNU tar). See [format-support.md](format-support.md).
 
-- **1.3.0 parity push** (+ `-d`/`--diff`, `tools/test_diff.sh`) (uncommitted at the time of writing): GNU-style option parser
+- **1.3.0 parity push** (+ `-d`/`--diff`, `tools/test_diff.sh`) (committed): GNU-style option parser
   (`app/cli.bend` + generated `app/cli_table.bend`, all 173 GNU options recognised, see
   [options.md](options.md)); `-f -` stdin/stdout; GNU `-tv` listing format and name quoting;
   `uname`/`gname` on create; `--owner/--group/--mode/--mtime/--numeric-owner`; `-k`,
