@@ -35,13 +35,13 @@ same_list "vcs+pattern" --exclude-vcs --exclude='keep'
 
 # ---- --newer family -------------------------------------------------------------------
 rm -rf s; mkdir -p s/old s/new; echo a > s/old/a; echo b > s/new/b; echo c > s/c; ln -s c s/l
-touch -d 2001-01-01 s/old/a s/old s/c s; touch -d 2030-01-01 s/new s/new/b
-for o in "--newer-mtime=2010-01-01" "--newer-mtime=@1000000000" "--newer-mtime=@0" "--newer-mtime=2031-01-01"; do
+touch -d 2001-01-01 s/old/a s/old s/c s; touch -d @1893456000 s/new s/new/b
+for o in "--newer-mtime=2010-01-01" "--newer-mtime=@1000000000" "--newer-mtime=@0" "--newer-mtime=@1924992000"; do
     # shellcheck disable=SC2086
     same_list "$o" $o
 done
 # --newer / -N / --after-date also look at ctime in GNU; with fresh ctimes everything is newer
-for o in "--newer=@1893456000" "-N @1893456000" "--after-date=@1893456000"; do
+for o in "--newer=@1861920000" "-N @1861920000" "--after-date=@1861920000"; do
     # shellcheck disable=SC2086
     same_list "$o (future date)" $o
 done
