@@ -152,6 +152,7 @@ run_expect 'ABI OK' "ABI check" "$ROOT/tools/abi_check.sh"
 # 3. Native build
 # --------------------------------------------------------------------------- #
 begin "native build"
+mkdir -p "$ROOT/build"
 # Build directly to build/btar so the gate artifact sha equals the packaged binary
 # (Bend embeds the output name, so a temp filename would change the bytes).
 run_logged "$BEND" app/main.bend -o build/btar \
