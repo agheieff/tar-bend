@@ -16,9 +16,12 @@ ok() { pass=$((pass + 1)); }
 bad() { fail=$((fail + 1)); printf '  FAIL %s\n' "$1"; }
 
 same_list() { # label -- options...   (btar vs GNU member lists of a tree)
-    local label="$1"; shift
-    if [ "$(tar -C s --sort=name -cf - "$@" . 2>/dev/null | tar -tf -)" = \
-         "$("$BTAR" -C s --sort=name -cf - "$@" . 2>/dev/null | tar -tf -)" ]; then ok; else bad "$label"; fi
+    local label="$1" want got; shift
+    want="$(tar -C s --sort=name -cf - "$@" . 2>/dev/null | tar -tf -)"
+    got="$("$BTAR" -C s --sort=name -cf - "$@" . 2>/dev/null | tar -tf -)"
+    if [ "$want" = "$got" ]; then ok; else
+        bad "$label"; printf '    GNU:  %s\n    btar: %s\n' "$(echo $want)" "$(echo $got)"
+    fi
 }
 
 # ---- exclusion sets -----------------------------------------------------------------
