@@ -30,6 +30,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang libarchive-tools gzip file python3 curl
 
+      - name: Install Lean (the proof gate's `--verdict` needs v4.34.0)
+        run: |
+          curl -sSfL https://elan.lean-lang.org/elan-init.sh | sh -s -- -y --default-toolchain leanprover/lean4:v4.34.0
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
       - name: Cache pinned Bend toolchain
         uses: actions/cache@v4
         with:

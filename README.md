@@ -55,7 +55,7 @@ slow end). It uses 11 to 131 MiB of memory. The 1.3.0 additions are not benchmar
 ## Build and use
 
 The project pins Bend 2.0.39 in `.cache/toolchain` (it never touches a global install). It needs
-clang 14+, GNU tar, bsdtar, gzip and Python 3.11+ for the tests. `tools/ci.sh` downloads and
+clang 14+, GNU tar, bsdtar, gzip and Python 3.11+ for the tests, and Lean v4.34.0 (via elan) for the proof check. `tools/ci.sh` downloads and
 sha256-checks the toolchain and runs the gate:
 
 ```sh
